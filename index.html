@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Abyss — Dive Planner & Deco Logbook</title>
+  <meta name="description" content="Bühlmann ZH-L16C dive planner and deco logbook with UDDF import. Works offline as a PWA.">
+  <meta name="theme-color" content="#060d18">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/svg+xml" href="icons/icon.svg">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="ocean-bg" aria-hidden="true">
+    <div class="bubbles"></div>
+  </div>
+
+  <header class="topbar">
+    <a class="brand" href="#/">
+      <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true">
+        <path d="M12 2C7 8 4 12.5 4 16a8 8 0 0 0 16 0c0-3.5-3-8-8-14z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+        <circle cx="10" cy="15" r="1.4" fill="currentColor"/>
+        <circle cx="13.5" cy="11.5" r="1" fill="currentColor"/>
+      </svg>
+      <span>ABYSS</span>
+    </a>
+    <nav class="nav">
+      <a href="#/" data-route="dashboard">Dashboard</a>
+      <a href="#/planner" data-route="planner">Planner</a>
+      <a href="#/logbook" data-route="logbook">Logbook</a>
+      <a href="#/settings" data-route="settings">Settings</a>
+    </nav>
+    <button id="btn-install" class="btn btn-ghost btn-install" hidden>Install app</button>
+    <button id="btn-account" class="btn btn-outline btn-sm btn-account">Sign in</button>
+  </header>
+
+  <main id="main">
+
+    <!-- ============================ DASHBOARD ============================ -->
+    <section id="view-dashboard" class="view">
+      <div class="hero">
+        <h1 class="hero-title">Plan deep.<br>Surface clean.</h1>
+        <p class="hero-sub">A Bühlmann ZH-L16C decompression planner and logbook.
+          Import your dive history, track tissue saturation, and plan the next descent
+          with gradient factors — fully offline.</p>
+        <div class="hero-actions">
+          <a href="#/planner" class="btn btn-primary btn-lg">Start fresh — plan a dive</a>
+          <button id="btn-import-hero" class="btn btn-outline btn-lg">Import UDDF logbook</button>
+        </div>
+      </div>
+
+      <div class="tile-row" id="dash-tiles"></div>
+
+      <div class="grid-2">
+        <div class="card">
+          <h2>Residual tissue loading</h2>
+          <p class="card-hint" id="dash-tissue-hint"></p>
+          <div id="dash-gf-meter"></div>
+          <div id="dash-tissue-chart" class="chart-box"></div>
+        </div>
+        <div class="card">
+          <h2>Recent dives</h2>
+          <div id="dash-recent"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================= PLANNER ============================= -->
+    <section id="view-planner" class="view">
+      <h1 class="page-title">Dive planner</h1>
+
+      <div class="grid-planner">
+        <div class="card">
+          <h2>Profile</h2>
+          <div id="plan-segments" class="row-list"></div>
+          <button id="btn-add-segment" class="btn btn-ghost btn-sm">+ Add level</button>
+
+          <h2 class="mt">Gases</h2>
+          <div id="plan-gases" class="row-list"></div>
+          <button id="btn-add-gas" class="btn btn-ghost btn-sm">+ Add gas</button>
+
+          <h2 class="mt">Decompression</h2>
+          <div class="field-grid">
+            <label>GF low <input id="plan-gf-low" type="number" min="10" max="100" step="5"></label>
+            <label>GF high <input id="plan-gf-high" type="number" min="10" max="100" step="5"></label>
+          </div>
+
+          <h2 class="mt">Repetitive dive</h2>
+          <label class="check">
+            <input type="checkbox" id="plan-use-residual">
+            <span>Carry tissue loading from logbook</span>
+          </label>
+          <div class="field-grid" id="plan-si-wrap" hidden>
+            <label>Surface interval (min) <input id="plan-si" type="number" min="0" step="5" value="60"></label>
+          </div>
+          <p class="card-hint" id="plan-residual-hint"></p>
+
+          <button id="btn-plan" class="btn btn-primary btn-lg btn-block mt">Calculate plan</button>
+        </div>
+
+        <div id="plan-results" class="plan-results" hidden>
+          <div class="tile-row" id="plan-tiles"></div>
+          <div id="plan-warnings"></div>
+          <div class="card">
+            <h2>Profile & ceiling</h2>
+            <div id="plan-chart" class="chart-box"></div>
+          </div>
+          <div class="card">
+            <h2>Schedule</h2>
+            <div class="table-scroll">
+              <table class="table" id="plan-schedule"></table>
+            </div>
+          </div>
+          <div class="grid-2">
+            <div class="card">
+              <h2>Tissue loading on surfacing</h2>
+              <div id="plan-tissue-chart" class="chart-box"></div>
+            </div>
+            <div class="card">
+              <h2>Gas requirements</h2>
+              <div class="table-scroll">
+                <table class="table" id="plan-gas-table"></table>
+              </div>
+              <button id="btn-save-plan" class="btn btn-outline mt">Save plan to logbook</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================= LOGBOOK ============================= -->
+    <section id="view-logbook" class="view">
+      <div class="page-head">
+        <h1 class="page-title">Deco logbook</h1>
+        <div class="page-actions">
+          <button id="btn-import-log" class="btn btn-outline btn-sm">Import UDDF</button>
+          <button id="btn-export-log" class="btn btn-outline btn-sm">Export UDDF</button>
+        </div>
+      </div>
+      <div id="logbook-list"></div>
+      <div id="logbook-detail" hidden></div>
+    </section>
+
+    <!-- ============================= SETTINGS ============================= -->
+    <section id="view-settings" class="view">
+      <h1 class="page-title">Settings</h1>
+      <div class="grid-2">
+        <div class="card">
+          <h2>Model defaults</h2>
+          <div class="field-grid">
+            <label>GF low <input id="set-gfLow" type="number" min="10" max="100" step="5"></label>
+            <label>GF high <input id="set-gfHigh" type="number" min="10" max="100" step="5"></label>
+            <label>Last stop (m) <select id="set-lastStopDepth"><option value="3">3</option><option value="6">6</option></select></label>
+            <label>Surface pressure (bar) <input id="set-surfacePressure" type="number" min="0.7" max="1.1" step="0.001"></label>
+          </div>
+          <h2 class="mt">Rates & gas</h2>
+          <div class="field-grid">
+            <label>Descent (m/min) <input id="set-descentRate" type="number" min="5" max="30"></label>
+            <label>Ascent (m/min) <input id="set-ascentRate" type="number" min="3" max="18"></label>
+            <label>SAC bottom (L/min) <input id="set-sacBottom" type="number" min="5" max="50"></label>
+            <label>SAC deco (L/min) <input id="set-sacDeco" type="number" min="5" max="50"></label>
+            <label>ppO₂ max bottom <input id="set-ppO2MaxBottom" type="number" min="1.0" max="1.6" step="0.1"></label>
+            <label>ppO₂ max deco <input id="set-ppO2MaxDeco" type="number" min="1.0" max="1.6" step="0.1"></label>
+          </div>
+          <button id="btn-save-settings" class="btn btn-primary mt">Save settings</button>
+        </div>
+        <div class="card">
+          <h2>Cloud account</h2>
+          <p class="card-hint" id="set-account-status">Not signed in — the logbook lives only on this device.</p>
+          <button id="btn-account-settings" class="btn btn-outline btn-sm">Sign in / create account</button>
+          <button id="btn-sync-now" class="btn btn-outline btn-sm" hidden>Sync now</button>
+          <h2 class="mt">Data</h2>
+          <p class="card-hint">Everything is stored locally on this device. Export before clearing.</p>
+          <button id="btn-export-settings-log" class="btn btn-outline btn-sm">Export logbook (UDDF)</button>
+          <button id="btn-clear-data" class="btn btn-danger btn-sm">Clear all data</button>
+          <h2 class="mt">About</h2>
+          <p class="card-hint">Abyss implements the Bühlmann ZH-L16C algorithm with gradient factors,
+            NOAA CNS/OTU tracking and UDDF 3.2 import/export. It runs entirely in your browser and
+            works offline once installed.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <p><strong>⚠ Not for real-world dive planning.</strong> This software is an educational
+    simulation and has not been validated for actual decompression diving. Always plan dives
+    with certified tools and proper training.</p>
+  </footer>
+
+  <input type="file" id="file-uddf" accept=".uddf,.xml,application/xml" multiple hidden>
+
+  <dialog id="account-dialog" class="account-dialog">
+    <form method="dialog" class="account-form" id="account-form">
+      <h2 id="account-title">Cloud account</h2>
+      <div id="account-signed-out">
+        <p class="card-hint">Sign in to keep your deco logbook synced across devices.
+          It stays available offline and merges when you reconnect.</p>
+        <label>Email <input type="email" id="acc-email" autocomplete="username" required></label>
+        <label>Password <input type="password" id="acc-password" autocomplete="current-password" minlength="8" required></label>
+        <p class="account-error" id="account-error" hidden></p>
+        <div class="account-actions">
+          <button type="button" id="btn-do-login" class="btn btn-primary">Sign in</button>
+          <button type="button" id="btn-do-register" class="btn btn-outline">Create account</button>
+        </div>
+      </div>
+      <div id="account-signed-in" hidden>
+        <p class="card-hint">Signed in as <strong id="acc-current-email"></strong></p>
+        <p class="card-hint" id="acc-sync-info"></p>
+        <div class="account-actions">
+          <button type="button" id="btn-do-sync" class="btn btn-primary">Sync now</button>
+          <button type="button" id="btn-do-logout" class="btn btn-outline">Sign out</button>
+        </div>
+      </div>
+      <button type="submit" class="btn btn-ghost btn-sm account-close">Close</button>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

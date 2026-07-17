@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<uddf xmlns="http://www.streit.cc/uddf/3.2/" version="3.2.0">
+  <generator>
+    <name>Sample data</name>
+    <type>logbook</type>
+  </generator>
+  <gasdefinitions>
+    <mix id="mix-air">
+      <name>Air</name>
+      <o2>0.21</o2>
+      <n2>0.79</n2>
+      <he>0.0</he>
+    </mix>
+    <mix id="mix-ean50">
+      <name>EAN50</name>
+      <o2>0.50</o2>
+      <n2>0.50</n2>
+      <he>0.0</he>
+    </mix>
+  </gasdefinitions>
+  <divesitedata>
+    <divesite id="site-1">
+      <name>Blue Hole, Gozo</name>
+      <geography><latitude>36.053889</latitude><longitude>14.188611</longitude></geography>
+    </divesite>
+  </divesitedata>
+  <profiledata>
+    <repetitiongroup id="rg-1">
+      <dive id="dive-1">
+        <informationbeforedive>
+          <datetime>2026-07-14T09:30:00</datetime>
+          <link ref="site-1"/>
+          <surfaceintervalbeforedive><infinity/></surfaceintervalbeforedive>
+        </informationbeforedive>
+        <samples>
+          <waypoint><depth>0</depth><divetime>0</divetime><switchmix ref="mix-air"/></waypoint>
+          <waypoint><depth>18</depth><divetime>60</divetime></waypoint>
+          <waypoint><depth>32</depth><divetime>150</divetime></waypoint>
+          <waypoint><depth>32</depth><divetime>1500</divetime></waypoint>
+          <waypoint><depth>21</depth><divetime>1620</divetime><switchmix ref="mix-ean50"/></waypoint>
+          <waypoint><depth>12</depth><divetime>1740</divetime></waypoint>
+          <waypoint><depth>5</depth><divetime>1830</divetime></waypoint>
+          <waypoint><depth>5</depth><divetime>2010</divetime></waypoint>
+          <waypoint><depth>0</depth><divetime>2070</divetime></waypoint>
+        </samples>
+        <informationafterdive>
+          <greatestdepth>32.0</greatestdepth>
+          <diveduration>2070</diveduration>
+        </informationafterdive>
+      </dive>
+      <dive id="dive-2">
+        <informationbeforedive>
+          <datetime>2026-07-14T12:15:00</datetime>
+          <surfaceintervalbeforedive><passedtime>7830</passedtime></surfaceintervalbeforedive>
+        </informationbeforedive>
+        <samples>
+          <waypoint><depth>0</depth><divetime>0</divetime><switchmix ref="mix-air"/></waypoint>
+          <waypoint><depth>14</depth><divetime>50</divetime></waypoint>
+          <waypoint><depth>22</depth><divetime>120</divetime></waypoint>
+          <waypoint><depth>22</depth><divetime>1500</divetime></waypoint>
+          <waypoint><depth>10</depth><divetime>1620</divetime></waypoint>
+          <waypoint><depth>5</depth><divetime>1710</divetime></waypoint>
+          <waypoint><depth>5</depth><divetime>1890</divetime></waypoint>
+          <waypoint><depth>0</depth><divetime>1950</divetime></waypoint>
+        </samples>
+        <informationafterdive>
+          <greatestdepth>22.0</greatestdepth>
+          <diveduration>1950</diveduration>
+        </informationafterdive>
+      </dive>
+    </repetitiongroup>
+  </profiledata>
+</uddf>
