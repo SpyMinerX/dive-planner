@@ -1,0 +1,13 @@
+services:
+  dive-app:
+    build: .
+    image: dive-app
+    container_name: dive-app
+    ports:
+      - "8080:8080"
+    volumes:
+      - dive-data:/app/server/data
+    restart: unless-stopped
+
+volumes:
+  dive-data:

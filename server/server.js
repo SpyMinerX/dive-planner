@@ -172,21 +172,25 @@ async function handleApi(req, res, pathname) {
 
   if (pathname === '/api/logbook') {
     const file = logbookFile(auth.email);
+    const EMPTY = { dives: [], deleted: [], settings: null, settingsUpdatedAt: null, updatedAt: null };
     if (req.method === 'GET') {
-      return send(res, 200, readJson(file, { dives: [], deleted: [], updatedAt: null }));
+      return send(res, 200, { ...EMPTY, ...readJson(file, {}) });
     }
     if (req.method === 'PUT') {
       const body = await readBody(req);
-      if (!Array.isArray(body.dives) || !Array.isArray(body.deleted ?? [])) {
+      if (!Array.isArray(body.dives) || !Array.isArray(body.deleted ?? []) ||
+          (body.settings != null && typeof body.settings !== 'object')) {
         return send(res, 400, { error: 'Malformed logbook document.' });
       }
-      const current = readJson(file, { dives: [], deleted: [], updatedAt: null });
+      const current = { ...EMPTY, ...readJson(file, {}) };
       if (current.updatedAt && body.baseUpdatedAt !== current.updatedAt) {
         return send(res, 409, current); // client merges and retries
       }
       const doc = {
         dives: body.dives,
         deleted: (body.deleted || []).slice(-5000),
+        settings: body.settings ?? null,
+        settingsUpdatedAt: body.settingsUpdatedAt ?? null,
         updatedAt: new Date().toISOString(),
       };
       writeJsonAtomic(file, doc);

@@ -1,6 +1,6 @@
 /* Abyss service worker — offline-first app shell. */
 
-const CACHE = 'abyss-v3';
+const CACHE = 'abyss-v4';
 const ASSETS = [
   './',
   './index.html',

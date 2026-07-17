@@ -704,7 +704,9 @@ function saveSettingsFromForm() {
     }
   }
   store.saveSettings(settings);
+  store.touchSettings();
   recomputeChain();
+  scheduleSync();
   toast('Settings saved.', 'ok');
 }
 
@@ -742,14 +744,23 @@ async function doSync({ silent = false } = {}) {
   const acc = cloud.getAccount();
   if (!acc) return;
   try {
-    const result = await cloud.syncLogbook(logbook, store.loadTombstones());
+    const result = await cloud.syncLogbook(logbook, store.loadTombstones(), settings, store.settingsUpdatedAt());
     lastSyncAt = new Date();
-    if (result.changed) {
-      logbook = result.dives;
+    if (result.settingsChanged) {
+      // a newer settings edit from another device wins
+      settings = { ...store.DEFAULT_SETTINGS, ...result.settings };
+      store.saveSettings(settings);
+      store.setSettingsTimestamp(result.settingsAt);
+      renderSettings();
+      $('#plan-gf-low').value = settings.gfLow;
+      $('#plan-gf-high').value = settings.gfHigh;
+    }
+    if (result.changed || result.settingsChanged) {
+      if (result.changed) logbook = result.dives;
       store.saveLogbook(logbook);
       recomputeChain();
       route(); // re-render current view with merged data
-      if (!silent) toast('Logbook merged from the cloud.', 'ok');
+      if (!silent) toast(result.changed ? 'Logbook merged from the cloud.' : 'Settings updated from the cloud.', 'ok');
     } else if (!silent) {
       toast('Logbook synced.', 'ok');
     }

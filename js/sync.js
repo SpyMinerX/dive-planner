@@ -102,11 +102,13 @@ export function mergeLogbooks(localDives, remoteDives, deletedIds) {
 }
 
 /**
- * Full sync: pull, merge, push. Returns { dives, deleted, changed } where
- * `changed` is true when the merged logbook differs from the local input.
+ * Full sync: pull, merge, push. Syncs the dive list (union by id + tombstones)
+ * and the deco settings (whole-object, newest edit timestamp wins).
+ * Returns { dives, deleted, changed, settings, settingsAt, settingsChanged } —
+ * `changed`/`settingsChanged` flag when the merged result differs from local input.
  * Throws SyncError('offline'|'expired'|'error') on failure.
  */
-export async function syncLogbook(localDives, localDeleted) {
+export async function syncLogbook(localDives, localDeleted, localSettings = null, localSettingsAt = null) {
   const acc = getAccount();
   if (!acc) throw new SyncError('error', 'Not signed in.');
 
@@ -115,15 +117,29 @@ export async function syncLogbook(localDives, localDeleted) {
   for (let attempt = 0; attempt < 2; attempt++) {
     const deleted = [...new Set([...(remote.deleted || []), ...(localDeleted || [])])];
     const merged = mergeLogbooks(localDives, remote.dives, deleted);
+
+    // settings: the copy with the newer edit timestamp wins
+    let settings = localSettings, settingsAt = localSettingsAt, settingsChanged = false;
+    if (remote.settings && remote.settingsUpdatedAt &&
+        (!localSettingsAt || new Date(remote.settingsUpdatedAt) > new Date(localSettingsAt))) {
+      settings = remote.settings;
+      settingsAt = remote.settingsUpdatedAt;
+      settingsChanged = JSON.stringify(remote.settings) !== JSON.stringify(localSettings);
+    }
+
     try {
       await api('/api/logbook', {
         method: 'PUT',
         token: acc.token,
-        body: { dives: merged, deleted, baseUpdatedAt: remote.updatedAt ?? null },
+        body: {
+          dives: merged, deleted,
+          settings, settingsUpdatedAt: settingsAt,
+          baseUpdatedAt: remote.updatedAt ?? null,
+        },
       });
       const localIds = (localDives || []).map(d => d.id).join(',');
       const mergedIds = merged.map(d => d.id).join(',');
-      return { dives: merged, deleted, changed: localIds !== mergedIds };
+      return { dives: merged, deleted, changed: localIds !== mergedIds, settings, settingsAt, settingsChanged };
     } catch (e) {
       if (e.kind === 'conflict' && attempt === 0) { remote = e.payload; continue; }
       throw e;

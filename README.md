@@ -14,18 +14,39 @@ Everything runs in the browser — no build step, no backend, no dependencies.
   CNS/OTU oxygen-toxicity tracking, MOD/END/hypoxia warnings, gas requirements with reserve
 - **Deco logbook** — dives are chained: each dive's ending tissue saturation plus the
   surface interval feeds the next dive (repetitive-dive planning), with per-compartment
-  N₂/He loading charts and surfacing-GF history
+  N₂/He loading charts and surfacing-GF history. Dives are editable: name, dive site,
+  GPS position (with map link + "use current location"), and notes. Planned dives are
+  visually marked apart from real ones
+- **Dive events** — tag moments on the profile (gas switches, emergencies, sightings,
+  notes); they appear as glyph markers on the depth chart and sync with the logbook.
+  Gas switches are derived automatically from the profile
 - **UDDF 3.2 import/export** — bring dives from Subsurface or your dive computer
   (`samples/sample-dives.uddf` included for a test drive), export the whole logbook back out
 - **Start fresh** — or carry residual tissue loading from your last logged dive into the plan
 - **PWA** — installable, fully offline (service worker + manifest)
-- **Cloud accounts (optional)** — sign in to sync the logbook across devices.
+- **Cloud accounts (optional)** — sign in to sync the logbook **and the deco
+  calculation settings** (GF defaults, rates, SAC, ppO₂ limits, surface pressure)
+  across devices; the most recent settings edit wins.
   Offline-first: the device copy is always the source of truth, the app works fully
   without a connection, and changes sync **up** to the server whenever it's reachable
   (merge by dive id with deletion tombstones; conflicts resolved by re-merge).
   Signed out or server unreachable → everything simply stays local.
 
 ## Run it
+
+**Docker (recommended for deployment):**
+
+```sh
+docker compose up -d          # builds and runs on port 8080, data in the dive-data volume
+# or from the published image:
+docker run -d --name dive-app -p 8080:8080 \
+  -v dive-data:/app/server/data \
+  spyminer/abyss-deco-planner:latest
+```
+
+The image runs as the unprivileged `node` user, has a healthcheck, and keeps all
+accounts/logbooks in the `/app/server/data` volume. To publish a new version:
+`docker build -t spyminer/abyss-deco-planner . && docker push spyminer/abyss-deco-planner`.
 
 **With cloud sync** (zero-dependency Node server, also serves the app):
 
@@ -61,6 +82,7 @@ travel over plain HTTP.
 
 ## ⚠ Disclaimer
 
-**Not for real-world dive planning.** This is an educational simulation. The algorithm
-has not been validated for actual decompression diving; never dive a schedule produced
-by unverified software. Get proper training and use certified tools.
+**Plan with care.** Abyss can support your dive planning, but don't rely on it as your
+only source: cross-check every schedule against your dive computer or established
+tables, keep a conservative margin, and only conduct dives that your training and
+certification qualify you for. No software replaces proper training and judgement.

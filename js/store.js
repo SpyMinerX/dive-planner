@@ -40,12 +40,27 @@ function write(key, value) {
 
 /* ------------------------------ settings ------------------------------ */
 
+const KEY_SETTINGS_TS = 'abyss.settings.ts.v1';
+
 export function loadSettings() {
   return { ...DEFAULT_SETTINGS, ...read(KEY_SETTINGS, {}) };
 }
 
 export function saveSettings(s) {
   return write(KEY_SETTINGS, s);
+}
+
+/* Settings edit timestamp — lets cloud sync resolve which device edited last. */
+export function settingsUpdatedAt() {
+  return read(KEY_SETTINGS_TS, null);
+}
+
+export function touchSettings() {
+  write(KEY_SETTINGS_TS, new Date().toISOString());
+}
+
+export function setSettingsTimestamp(iso) {
+  write(KEY_SETTINGS_TS, iso);
 }
 
 /* ------------------------------ logbook ------------------------------- */
