@@ -127,7 +127,11 @@ body {
   flex: 1;
   overflow-x: auto;
 }
+.nav.nav-hidden { display: none; }
 .nav a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
   color: var(--ink-secondary);
   text-decoration: none;
   padding: 0.45rem 0.9rem;
@@ -135,7 +139,10 @@ body {
   font-size: 0.95rem;
   white-space: nowrap;
   transition: color .15s, background .15s;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
 }
+.nav a svg { width: 18px; height: 18px; flex-shrink: 0; }
 .nav a:hover { color: var(--ink-primary); background: rgba(148, 184, 230, 0.08); }
 .nav a.active { color: #06121f; background: var(--accent); font-weight: 650; }
 
@@ -220,6 +227,14 @@ main {
 }
 .hero-sub { color: var(--ink-secondary); font-size: 1.06rem; max-width: 58ch; margin: 0 0 1.6rem; }
 .hero-actions { display: flex; gap: 0.8rem; flex-wrap: wrap; }
+
+.hero-landing { text-align: center; max-width: 560px; margin: 0 auto; }
+.hero-landing .hero-sub { margin-left: auto; margin-right: auto; }
+.hero-landing .hero-actions { justify-content: center; }
+.hero-landing .card-hint { text-align: center; }
+
+.hero-compact { padding: clamp(1.4rem, 3vw, 2.2rem) 0 clamp(1rem, 2vw, 1.6rem); }
+.hero-compact .hero-title { font-size: clamp(1.8rem, 4vw, 2.6rem); margin-bottom: 0.5rem; }
 
 /* ------------------------------- buttons ------------------------------- */
 
@@ -307,7 +322,22 @@ input:focus, select:focus { outline: 2px solid var(--accent-deep); border-color:
   border-radius: 10px;
 }
 .row label { flex: 1 1 90px; }
-.row-note { color: var(--ink-muted); font-size: 0.8rem; padding-bottom: 0.5rem; white-space: nowrap; }
+.row-note { color: var(--ink-muted); font-size: 0.8rem; padding-bottom: 0.5rem; white-space: normal; }
+.row-warn { flex: 1 1 100%; color: var(--status-warning); font-size: 0.8rem; }
+.auto-tag {
+  display: inline-block;
+  margin-left: 0.3rem;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  background: rgba(57, 135, 229, 0.16);
+  color: var(--accent);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  vertical-align: 1px;
+}
+.gas-switch-reset { padding-bottom: 0.55rem; white-space: nowrap; }
 
 /* ------------------------------- alerts -------------------------------- */
 
@@ -348,6 +378,7 @@ input:focus, select:focus { outline: 2px solid var(--accent-deep); border-color:
 .table tr:last-child td { border-bottom: none; }
 tr.sched-stop td:first-child { color: var(--series-orange); }
 tr.sched-switch td { background: rgba(25, 158, 112, 0.07); }
+.switch-mark { color: var(--status-good); font-weight: 700; }
 
 .gas-chip {
   display: inline-block;
@@ -399,6 +430,7 @@ tr.sched-switch td { background: rgba(25, 158, 112, 0.07); }
 .gf-chip.gf-high { color: #ffb9b8; border-color: var(--status-critical); }
 .src-chip { color: var(--ink-muted); border-color: var(--axis); }
 .src-chip.rep { color: var(--accent); border-color: var(--accent-deep); }
+.src-chip.ok { color: #7fe28a; border-color: var(--status-good); }
 
 .detail-title { margin: 0.6rem 0; }
 .detail-date { font-size: 0.85rem; color: var(--ink-muted); font-weight: 400; margin-left: 0.6rem; }
@@ -460,6 +492,11 @@ tr.sched-switch td { background: rgba(25, 158, 112, 0.07); }
 .event-time { color: var(--ink-muted); font-variant-numeric: tabular-nums; min-width: 4.5rem; }
 .event-text { flex: 1; color: var(--ink-secondary); }
 .event-add { margin-top: 0.8rem; }
+.event-add.flash { animation: flash-ring 1.2s ease; }
+@keyframes flash-ring {
+  0% { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(45, 212, 234, 0.35); }
+  100% { border-color: var(--border); box-shadow: none; }
+}
 
 /* -------------------------------- charts ------------------------------- */
 
@@ -541,6 +578,7 @@ tr.sched-switch td { background: rgba(25, 158, 112, 0.07); }
 }
 .account-form h2 { margin: 0 0 0.3rem; font-size: 1.2rem; }
 .account-form label { margin-top: 0.4rem; }
+.field-hint { margin: 0.1rem 0 0; font-size: 0.82rem; }
 .account-actions { display: flex; gap: 0.6rem; margin-top: 0.8rem; flex-wrap: wrap; }
 .account-error { color: #ffb9b8; font-size: 0.88rem; margin: 0.4rem 0 0; }
 .account-close { align-self: flex-end; margin-top: 0.4rem; }
@@ -578,9 +616,59 @@ tr.sched-switch td { background: rgba(25, 158, 112, 0.07); }
   border-top: 1px solid var(--border);
 }
 
+/* ------------------------- mobile: app-like shell ----------------------- */
+
 @media (max-width: 640px) {
-  .topbar { flex-wrap: wrap; gap: 0.6rem; }
-  .nav { order: 3; width: 100%; }
+  /* the topbar's backdrop-filter would become the containing block for the
+     fixed bottom nav — use a solid background on mobile instead */
+  .topbar {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: rgba(6, 13, 24, 0.96);
+  }
+
+  /* bottom tab bar, native-app style */
+  .nav {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 30;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0;
+    background: rgba(6, 13, 24, 0.92);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border-top: 1px solid var(--border);
+    padding: 0.35rem 0.4rem calc(0.45rem + env(safe-area-inset-bottom, 0px));
+    overflow: visible;
+  }
+  .nav a {
+    flex-direction: column;
+    justify-content: center;
+    gap: 3px;
+    font-size: 0.68rem;
+    letter-spacing: 0.02em;
+    padding: 0.35rem 0.2rem;
+    border-radius: 12px;
+    min-height: 48px; /* comfortable touch target */
+  }
+  .nav a svg { width: 23px; height: 23px; }
+  .nav a.active {
+    background: transparent;
+    color: var(--accent);
+    font-weight: 700;
+  }
+  .nav a:hover { background: transparent; }
+
+  /* content must clear the tab bar */
+  main { padding-bottom: calc(84px + env(safe-area-inset-bottom, 0px)); }
+  .footer { padding-bottom: calc(96px + env(safe-area-inset-bottom, 0px)); }
+  .toast { bottom: calc(88px + env(safe-area-inset-bottom, 0px)); }
+
+  .topbar { gap: 0.6rem; }
   .dive-card { flex-direction: column; align-items: flex-start; }
   .dive-card-stats { justify-content: flex-start; }
+  .hero-actions .btn-lg { width: 100%; text-align: center; }
 }

@@ -25,11 +25,23 @@
       </svg>
       <span>ABYSS</span>
     </a>
-    <nav class="nav">
-      <a href="#/" data-route="dashboard">Dashboard</a>
-      <a href="#/planner" data-route="planner">Planner</a>
-      <a href="#/logbook" data-route="logbook">Logbook</a>
-      <a href="#/settings" data-route="settings">Settings</a>
+    <nav class="nav" id="main-nav">
+      <a href="#/" data-route="dashboard">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-8 9 8M5 9.5V20a1 1 0 001 1h4v-6h4v6h4a1 1 0 001-1V9.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>Dashboard</span>
+      </a>
+      <a href="#/planner" data-route="planner">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M15.5 8.5l-2.2 4.8-4.8 2.2 2.2-4.8z" fill="currentColor"/></svg>
+        <span>Planner</span>
+      </a>
+      <a href="#/logbook" data-route="logbook">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19.5V6a2 2 0 012-2h12v14H7.5a2.5 2.5 0 000 5H19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>Logbook</span>
+      </a>
+      <a href="#/settings" data-route="settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M17 7h3M4 12h3M11 12h9M4 17h13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="15" cy="7" r="2" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="9" cy="12" r="2" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="19" cy="17" r="2" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+        <span>Settings</span>
+      </a>
     </nav>
     <button id="btn-install" class="btn btn-ghost btn-install" hidden>Install app</button>
     <button id="btn-account" class="btn btn-outline btn-sm btn-account">Sign in</button>
@@ -39,11 +51,10 @@
 
     <!-- ============================ DASHBOARD ============================ -->
     <section id="view-dashboard" class="view">
-      <div class="hero">
-        <h1 class="hero-title">Plan deep.<br>Surface clean.</h1>
-        <p class="hero-sub">A Bühlmann ZH-L16C decompression planner and logbook.
-          Import your dive history, track tissue saturation, and plan the next descent
-          with gradient factors — fully offline.</p>
+      <div class="hero hero-compact">
+        <h1 class="hero-title">Your saturation</h1>
+        <p class="hero-sub">Live tissue loading from your dive history — plan your next descent
+          with confidence.</p>
         <div class="hero-actions">
           <a href="#/planner" class="btn btn-primary btn-lg">Start fresh — plan a dive</a>
           <button id="btn-import-hero" class="btn btn-outline btn-lg">Import UDDF logbook</button>
@@ -54,10 +65,15 @@
 
       <div class="grid-2">
         <div class="card">
-          <h2>Residual tissue loading</h2>
+          <h2>Current saturation</h2>
           <p class="card-hint" id="dash-tissue-hint"></p>
           <div id="dash-gf-meter"></div>
           <div id="dash-tissue-chart" class="chart-box"></div>
+          <div id="dash-planned-block" hidden>
+            <h2 class="mt">Projected after planned dives</h2>
+            <p class="card-hint" id="dash-planned-hint"></p>
+            <div id="dash-planned-meter"></div>
+          </div>
         </div>
         <div class="card">
           <h2>Recent dives</h2>
@@ -84,6 +100,12 @@
           <div class="field-grid">
             <label>GF low <input id="plan-gf-low" type="number" min="10" max="100" step="5"></label>
             <label>GF high <input id="plan-gf-high" type="number" min="10" max="100" step="5"></label>
+          </div>
+          <p class="card-hint" id="plan-safety-stop-hint"></p>
+
+          <h2 class="mt">Timing</h2>
+          <div class="field-grid">
+            <label>Planned start <input id="plan-start" type="datetime-local"></label>
           </div>
 
           <h2 class="mt">Repetitive dive</h2>
@@ -163,6 +185,15 @@
             <label>ppO₂ max bottom <input id="set-ppO2MaxBottom" type="number" min="1.0" max="1.6" step="0.1"></label>
             <label>ppO₂ max deco <input id="set-ppO2MaxDeco" type="number" min="1.0" max="1.6" step="0.1"></label>
           </div>
+          <h2 class="mt">Safety stop</h2>
+          <label class="check">
+            <input type="checkbox" id="set-safetyStopEnabled">
+            <span>Add a safety stop to every plan</span>
+          </label>
+          <div class="field-grid" id="set-safety-stop-wrap">
+            <label>Depth (m) <input id="set-safetyStopDepth" type="number" min="3" max="15" step="1"></label>
+            <label>Time (min) <input id="set-safetyStopMin" type="number" min="1" max="20" step="1"></label>
+          </div>
           <button id="btn-save-settings" class="btn btn-primary mt">Save settings</button>
         </div>
         <div class="card">
@@ -179,6 +210,20 @@
             NOAA CNS/OTU tracking and UDDF 3.2 import/export. It runs entirely in your browser and
             works offline once installed.</p>
         </div>
+      </div>
+    </section>
+
+    <!-- ============================= LANDING ============================== -->
+    <section id="view-landing" class="view">
+      <div class="hero hero-landing">
+        <h1 class="hero-title">Plan deep.<br>Surface clean.</h1>
+        <p class="hero-sub">A Bühlmann ZH-L16C decompression planner and logbook.
+          Import your dive history, track tissue saturation, and plan the next descent
+          with gradient factors — fully offline.</p>
+        <div class="hero-actions">
+          <button id="btn-landing-signin" class="btn btn-primary btn-lg">Sign in / create account</button>
+        </div>
+        <p class="card-hint">Free account — your logbook stays available offline and syncs across devices.</p>
       </div>
     </section>
   </main>
@@ -199,7 +244,9 @@
         <p class="card-hint">Sign in to keep your deco logbook synced across devices.
           It stays available offline and merges when you reconnect.</p>
         <label>Email <input type="email" id="acc-email" autocomplete="username" required></label>
-        <label>Password <input type="password" id="acc-password" autocomplete="current-password" minlength="8" required></label>
+        <label>Password <input type="password" id="acc-password" autocomplete="current-password" minlength="8" required title="At least 8 characters"></label>
+        <p class="card-hint field-hint">Must be at least 8 characters. First time here? Use
+          <strong>Create account</strong> — <strong>Sign in</strong> only works once that email is already registered.</p>
         <p class="account-error" id="account-error" hidden></p>
         <div class="account-actions">
           <button type="button" id="btn-do-login" class="btn btn-primary">Sign in</button>
@@ -214,7 +261,7 @@
           <button type="button" id="btn-do-logout" class="btn btn-outline">Sign out</button>
         </div>
       </div>
-      <button type="submit" class="btn btn-ghost btn-sm account-close">Close</button>
+      <button type="submit" formnovalidate class="btn btn-ghost btn-sm account-close" id="btn-account-close">Cancel</button>
     </form>
   </dialog>
 

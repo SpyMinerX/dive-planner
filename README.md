@@ -26,7 +26,14 @@ Everything runs in the browser — no build step, no backend, no dependencies.
 - **PWA** — installable, fully offline (service worker + manifest)
 - **Cloud accounts (optional)** — sign in to sync the logbook **and the deco
   calculation settings** (GF defaults, rates, SAC, ppO₂ limits, surface pressure)
-  across devices; the most recent settings edit wins.
+  across devices; the most recent settings edit wins. Sync is a fast push/pull
+  loop (change-polling every 10 s + instant push on edits), so two devices can
+  work on the same logbook simultaneously.
+- **Current vs planned saturation** — the dashboard separates live tissue state
+  (real dives only, ticking as you off-gas) from the projection after upcoming
+  planned dives. Plans are replaced by importing the recorded dive (UDDF) — from
+  the dive's detail page, or automatically when a general import contains a dive
+  recorded within ±6 h of a plan's start.
   Offline-first: the device copy is always the source of truth, the app works fully
   without a connection, and changes sync **up** to the server whenever it's reachable
   (merge by dive id with deletion tombstones; conflicts resolved by re-merge).

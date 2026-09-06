@@ -17,6 +17,9 @@ export const DEFAULT_SETTINGS = {
   surfacePressure: 1.01325, // bar
   ppO2MaxBottom: 1.4,
   ppO2MaxDeco: 1.6,
+  safetyStopEnabled: false,
+  safetyStopDepth: 5,  // m
+  safetyStopMin: 3,    // min
 };
 
 function read(key, fallback) {
@@ -100,6 +103,11 @@ export function updateDive(id, patch) {
   const i = book.findIndex(d => d.id === id);
   if (i >= 0) {
     book[i] = { ...book[i], ...patch, modifiedAt: new Date().toISOString() };
+    // datetime may have changed (e.g. plan replaced with actual data) — keep order
+    book.sort((a, b) => {
+      if (a.datetime && b.datetime) return new Date(a.datetime) - new Date(b.datetime);
+      return 0;
+    });
     saveLogbook(book);
   }
   return book;

@@ -78,6 +78,13 @@ export function dropAccount() {
   saveAccount(null);
 }
 
+/** Cheap poll: just the server document stamp, for change detection. */
+export async function remoteMeta() {
+  const acc = getAccount();
+  if (!acc) throw new SyncError('error', 'Not signed in.');
+  return api('/api/logbook/meta', { token: acc.token });
+}
+
 /* ------------------------------ merging ------------------------------- */
 
 /**
@@ -128,7 +135,7 @@ export async function syncLogbook(localDives, localDeleted, localSettings = null
     }
 
     try {
-      await api('/api/logbook', {
+      const put = await api('/api/logbook', {
         method: 'PUT',
         token: acc.token,
         body: {
@@ -137,9 +144,14 @@ export async function syncLogbook(localDives, localDeleted, localSettings = null
           baseUpdatedAt: remote.updatedAt ?? null,
         },
       });
-      const localIds = (localDives || []).map(d => d.id).join(',');
-      const mergedIds = merged.map(d => d.id).join(',');
-      return { dives: merged, deleted, changed: localIds !== mergedIds, settings, settingsAt, settingsChanged };
+      // dives are merged by id+modifiedAt, so content edits count as changes too
+      const localKeys = (localDives || []).map(d => `${d.id}@${d.modifiedAt || ''}`).join(',');
+      const mergedKeys = merged.map(d => `${d.id}@${d.modifiedAt || ''}`).join(',');
+      return {
+        dives: merged, deleted, changed: localKeys !== mergedKeys,
+        settings, settingsAt, settingsChanged,
+        serverUpdatedAt: put.updatedAt ?? null,
+      };
     } catch (e) {
       if (e.kind === 'conflict' && attempt === 0) { remote = e.payload; continue; }
       throw e;

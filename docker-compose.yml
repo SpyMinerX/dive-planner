@@ -1,8 +1,7 @@
 services:
   dive-app:
-    build: .
-    image: dive-app
-    container_name: dive-app
+    image: spyminer/abyss-deco-planner:latest
+    container_name: abyss
     ports:
       - "8080:8080"
     volumes:

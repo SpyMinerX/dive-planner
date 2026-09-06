@@ -1,6 +1,6 @@
 /* Abyss service worker — offline-first app shell. */
 
-const CACHE = 'abyss-v4';
+const CACHE = 'abyss-v7';
 const ASSETS = [
   './',
   './index.html',
@@ -41,20 +41,23 @@ self.addEventListener('fetch', event => {
   // offline-first on its own — sync simply fails soft and retries when online.
   if (url.pathname.startsWith('/api/')) return;
 
-  // cache-first, falling back to network (and caching the result)
+  // network-first: whenever we're online, always go to the network and
+  // refresh the cache with the response, so a connected user never gets
+  // stuck on a stale cached copy. The cache is only ever read as a fallback
+  // when the network request actually fails (offline, or mid-flight drop).
   event.respondWith(
-    caches.match(request, { ignoreSearch: true }).then(cached => {
-      if (cached) return cached;
-      return fetch(request).then(resp => {
-        if (resp.ok) {
-          const copy = resp.clone();
-          caches.open(CACHE).then(cache => cache.put(request, copy));
-        }
-        return resp;
-      }).catch(() => {
+    fetch(request).then(resp => {
+      if (resp.ok) {
+        const copy = resp.clone();
+        caches.open(CACHE).then(cache => cache.put(request, copy));
+      }
+      return resp;
+    }).catch(() =>
+      caches.match(request, { ignoreSearch: true }).then(cached => {
+        if (cached) return cached;
         if (request.mode === 'navigate') return caches.match('./index.html');
         throw new Error('offline');
-      });
-    })
+      })
+    )
   );
 });

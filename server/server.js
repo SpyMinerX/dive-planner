@@ -170,6 +170,12 @@ async function handleApi(req, res, pathname) {
     return send(res, 200, { email: auth.email });
   }
 
+  // cheap change-detection for client polling: just the document stamp
+  if (req.method === 'GET' && pathname === '/api/logbook/meta') {
+    const doc = readJson(logbookFile(auth.email), {});
+    return send(res, 200, { updatedAt: doc.updatedAt ?? null });
+  }
+
   if (pathname === '/api/logbook') {
     const file = logbookFile(auth.email);
     const EMPTY = { dives: [], deleted: [], settings: null, settingsUpdatedAt: null, updatedAt: null };

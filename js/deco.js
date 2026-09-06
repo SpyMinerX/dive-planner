@@ -57,6 +57,17 @@ export function mod(gas, ppO2Max = 1.4, surfaceP = SURFACE_PRESSURE) {
   return pressureToDepth(ppO2Max / gas.o2, surfaceP);
 }
 
+// Minimum ppO2 (bar) a mix must clear to not be hypoxic. The hard safety
+// cutoff used to raise a *critical* warning is a little lower (0.16 bar,
+// checked directly in planDive) — this is the target used when *suggesting*
+// a switch/travel depth, so the suggestion clears the hard limit with margin.
+export const MIN_PPO2 = 0.18;
+
+/** Shallowest depth at which a gas clears a minimum ppO2 (the "MOD" of a floor instead of a ceiling) — the switch-in depth for a hypoxic travel/bottom mix. */
+export function minDepth(gas, ppO2Min = MIN_PPO2, surfaceP = SURFACE_PRESSURE) {
+  return Math.max(0, pressureToDepth(ppO2Min / gas.o2, surfaceP));
+}
+
 /** Equivalent narcotic depth (O2 counted narcotic). */
 export function end(depth, gas, surfaceP = SURFACE_PRESSURE) {
   const p = depthToPressure(depth, surfaceP);
@@ -211,10 +222,19 @@ export function otuRate(ppO2) {
  * Plan a dive.
  * @param {object} opts
  *   segments:    [{ depth, time }]  planned levels; each segment's time includes travel to it
- *   gases:       [{ o2, he, switchDepth|null, use: 'bottom'|'deco' }]
+ *   gases:       [{ o2, he, switchDepth|null, use: 'travel'|'bottom'|'deco'|'bailout' }]
+ *                'travel' and 'bottom' share one descent-side chain (switch
+ *                depth = when to switch INTO that gas); 'deco' is the
+ *                ascent-side chain (switch depth = when to switch UP into
+ *                it); 'bailout' takes no part in the plan at all — it is
+ *                only carried through to the returned gas list/usage table.
  *   gfLow/gfHigh: gradient factors as fractions (e.g. 0.35 / 0.75)
  *   startTissues: Tissues instance (residual loading) or null for clean
  *   surfaceP, descentRate, ascentRate, lastStopDepth, sacBottom, sacDeco
+ *   safetyStopDepth/safetyStopMin: optional extra stop held on the way up
+ *     (e.g. 5 m for 3 min) on top of whatever the model already requires —
+ *     added even to a no-decompression dive. Pass safetyStopDepth: null (or
+ *     safetyStopMin: 0) to leave it out.
  * @returns plan { schedule, profile, tissuesEnd, warnings, tts, runtime, cns, otu, gasUsage, ndl, firstStop }
  */
 export function planDive(opts) {
@@ -232,6 +252,8 @@ export function planDive(opts) {
     startTissues = null,
     ppO2MaxBottom = 1.4,
     ppO2MaxDeco = 1.6,
+    safetyStopDepth = null,
+    safetyStopMin = 0,
   } = opts;
 
   const tissues = startTissues ? startTissues.clone() : new Tissues(surfaceP);
@@ -242,16 +264,33 @@ export function planDive(opts) {
   let cns = 0, otu = 0;
   const gasUsage = gases.map(() => 0);
 
-  const bottomGases = gases.filter(g => g.use !== 'deco');
-  const bottomGas = bottomGases[0] || gases[0];
-  if (!bottomGas) throw new Error('At least one gas is required');
+  // Bottom-gas chain: ordered shallow → deep. The entry with no switchDepth
+  // (or the shallowest, if several lack one) is breathed from the surface;
+  // any further entries are deeper/leaner mixes — a travel gas, or a hypoxic
+  // bottom trimix reached via one — that switch in once descent passes their
+  // switchDepth, and switch back out to the previous entry once ascent rises
+  // back past it. This is the descent-side mirror of the deco-gas chain below
+  // (which switches in on the way *up*). Bailout gas is carried but never
+  // breathed in the plan, so it takes no part in either chain.
+  const bottomChain = gases
+    .filter(g => g.use !== 'deco' && g.use !== 'bailout')
+    .slice()
+    .sort((a, b) => (a.switchDepth ?? -1) - (b.switchDepth ?? -1));
+  if (!bottomChain.length) throw new Error('At least one gas is required');
+  const bottomGas = bottomChain[0]; // the gas actually breathed at the surface
+  // NDL is asked of the gas actually worked at depth — the last (deepest)
+  // entry explicitly tagged 'bottom', falling back to the deepest chain entry
+  // if none was tagged that way (e.g. every gas left as 'travel').
+  const namedBottomGases = gases.filter(g => g.use === 'bottom');
+  const ndlGas = namedBottomGases[namedBottomGases.length - 1] || bottomChain[bottomChain.length - 1];
   const decoGases = gases
     .filter(g => g.use === 'deco' && g.switchDepth != null)
     .sort((a, b) => b.switchDepth - a.switchDepth);
 
   let t = 0;
   let depth = 0;
-  let gas = bottomGas;
+  let bottomChainIdx = 0;
+  let gas = bottomChain[0];
 
   const pAt = d => depthToPressure(d, surfaceP);
 
@@ -277,23 +316,61 @@ export function planDive(opts) {
   }
 
   // --- NDL at the first segment depth on bottom gas (informational) ---
-  const ndl = computeNDL(segments[0].depth, bottomGas, gfHigh, startTissues, surfaceP, descentRate);
+  const ndl = computeNDL(segments[0].depth, ndlGas, gfHigh, startTissues, surfaceP, descentRate);
 
   sample();
 
+  /** Index into bottomChain of whichever entry is appropriate at depth d. */
+  function bottomGasIndexFor(d) {
+    let idx = 0;
+    for (let i = 1; i < bottomChain.length; i++) {
+      if (d >= bottomChain[i].switchDepth - 1e-9) idx = i;
+    }
+    return idx;
+  }
+  function maybeSwitchBottomGas(d) {
+    const idx = bottomGasIndexFor(d);
+    if (idx !== bottomChainIdx) {
+      bottomChainIdx = idx;
+      gas = bottomChain[bottomChainIdx];
+      schedule.push({ type: 'switch', from: d, to: d, duration: 0, runtime: t, gas });
+      return true;
+    }
+    return false;
+  }
+  /** One travel leg on the current gas; returns its duration (0 if from===to). */
+  function travelLeg(from, to, sac) {
+    const dur = Math.abs(to - from) / (to > from ? descentRate : ascentRate);
+    if (dur <= 0) return 0;
+    tissues.loadRamp(pAt(from), pAt(to), gas, dur);
+    trackTox((from + to) / 2, gas, dur);
+    trackGas(from, to, gas, dur, sac);
+    t += dur;
+    schedule.push({ type: to > from ? 'descent' : 'level-change', from, to, duration: dur, runtime: t, gas });
+    depth = to;
+    sample();
+    return dur;
+  }
+  /** Travel to targetDepth, splitting at any bottom-chain switch depths crossed en route. */
+  function travelWithBottomSwitches(targetDepth, sac) {
+    const lo = Math.min(depth, targetDepth), hi = Math.max(depth, targetDepth);
+    const crossings = bottomChain
+      .map(g => g.switchDepth)
+      .filter(sd => sd != null && sd > lo + 1e-9 && sd < hi - 1e-9)
+      .sort((a, b) => targetDepth > depth ? a - b : b - a);
+    let total = 0;
+    for (const sd of crossings) {
+      total += travelLeg(depth, sd, sac);
+      maybeSwitchBottomGas(depth);
+    }
+    total += travelLeg(depth, targetDepth, sac);
+    maybeSwitchBottomGas(depth);
+    return total;
+  }
+
   // --- Bottom phase: travel + level for each segment ---
   for (const seg of segments) {
-    const travel = Math.abs(seg.depth - depth) / (seg.depth > depth ? descentRate : ascentRate);
-    if (travel > 0) {
-      tissues.loadRamp(pAt(depth), pAt(seg.depth), gas, travel);
-      trackTox((depth + seg.depth) / 2, gas, travel);
-      trackGas(depth, seg.depth, gas, travel, sacBottom);
-      t += travel;
-      const from = depth;
-      depth = seg.depth;
-      schedule.push({ type: seg.depth > from ? 'descent' : 'level-change', from, to: depth, duration: travel, runtime: t, gas });
-      sample();
-    }
+    const travel = travelWithBottomSwitches(seg.depth, sacBottom);
     const levelTime = Math.max(0, seg.time - travel);
     if (levelTime > 0) {
       // integrate in 1-min slices so the profile chart gets points
@@ -326,7 +403,21 @@ export function planDive(opts) {
   const rawCeiling = tissues.ceiling(gfLow);
   firstStopDepth = rawCeiling <= 0 ? 0 : Math.max(lastStopDepth, Math.ceil(rawCeiling / 3) * 3);
 
+  // Optional extra safety stop (e.g. 5 m / 3 min) held on top of whatever the
+  // model already requires — even on a no-decompression dive. `safetyStopDone`
+  // flips true once it's been held so it's never forced a second time.
+  let safetyStopDone = safetyStopDepth == null || safetyStopMin <= 0;
+
   function maybeSwitchGas(d) {
+    // Reverting from a deeper bottom-chain gas (e.g. a hypoxic bottom trimix)
+    // back to its shallower neighbour takes priority — you must be off it
+    // before it's no longer appropriate, same as the descent-side switch.
+    if (bottomChainIdx > 0 && gas === bottomChain[bottomChainIdx] && d <= bottomChain[bottomChainIdx].switchDepth + 1e-9) {
+      bottomChainIdx--;
+      gas = bottomChain[bottomChainIdx];
+      schedule.push({ type: 'switch', from: d, to: d, duration: 0, runtime: t, gas });
+      return true;
+    }
     for (const g of decoGases) {
       if (g !== gas && d <= g.switchDepth + 1e-9 && gases.indexOf(g) > gases.indexOf(gas)) {
         // only switch "up" to richer mixes as we ascend
@@ -355,6 +446,13 @@ export function planDive(opts) {
     sample();
   }
 
+  /** The next 3 m-grid stop above fromDepth — pulled in to the safety-stop depth if that sits between the two. */
+  function nextGridStep(fromDepth) {
+    let next = Math.max(0, fromDepth - 3 < lastStopDepth ? 0 : fromDepth - 3);
+    if (!safetyStopDone && safetyStopDepth < fromDepth - 1e-9 && safetyStopDepth > next + 1e-9) next = safetyStopDepth;
+    return next;
+  }
+
   let guard = 0;
   while (depth > 0) {
     if (++guard > 2000) { warnings.push({ level: 'critical', text: 'Planner aborted: schedule did not converge' }); break; }
@@ -371,33 +469,46 @@ export function planDive(opts) {
         target = Math.ceil(g.switchDepth / 3) * 3 <= depth ? g.switchDepth : target;
       }
     }
+    if (bottomChainIdx > 0 && gas === bottomChain[bottomChainIdx]) {
+      const sd = bottomChain[bottomChainIdx].switchDepth;
+      if (sd < depth - 1e-9 && sd > target + 1e-9) target = sd;
+    }
+    // Force a pause at the safety-stop depth too, once nothing deeper is
+    // still forcing the ascent to stop somewhere below it.
+    if (!safetyStopDone && safetyStopDepth <= depth + 1e-9 && safetyStopDepth > target + 1e-9) {
+      target = safetyStopDepth;
+    }
 
     if (target >= depth - 1e-9) {
-      // Can't ascend — hold as a deco stop at current depth in 1-min steps
+      // Can't ascend — hold as a deco stop (or the safety stop) at current depth in 1-min steps
       const stopDepth = depth;
+      const atSafetyStop = !safetyStopDone && Math.abs(stopDepth - safetyStopDepth) < 1e-6;
       let stopTime = 0;
-      maybeSwitchGas(stopDepth);
+      while (maybeSwitchGas(stopDepth)) { /* resolve any stacked switches at this depth */ }
       let innerGuard = 0;
       while (innerGuard++ < 999) {
-        const next = Math.max(0, stopDepth - 3 < lastStopDepth ? 0 : stopDepth - 3);
+        const next = nextGridStep(stopDepth);
         const gfAtNext = gfCurrent(next);
         const trial = tissues.clone();
         const ascDur = (stopDepth - next) / ascentRate;
         trial.loadRamp(pAt(stopDepth), pAt(next), gas, ascDur);
-        if (trial.ceiling(gfAtNext) <= next + 1e-6) break;
+        const ceilingClear = trial.ceiling(gfAtNext) <= next + 1e-6;
+        const safetyClear = !atSafetyStop || stopTime >= safetyStopMin;
+        if (ceilingClear && safetyClear) break;
         tissues.loadConstant(pAt(stopDepth), gas, 1);
         trackTox(stopDepth, gas, 1);
         trackGas(stopDepth, stopDepth, gas, 1, sacDeco);
         t += 1; stopTime += 1;
         sample();
       }
+      if (atSafetyStop) safetyStopDone = true;
       if (stopTime > 0) schedule.push({ type: 'stop', from: stopDepth, to: stopDepth, duration: stopTime, runtime: t, gas });
-      const next = Math.max(0, stopDepth - 3 < lastStopDepth ? 0 : stopDepth - 3);
+      const next = nextGridStep(stopDepth);
       ascendTo(next);
-      maybeSwitchGas(depth);
+      while (maybeSwitchGas(depth)) { /* resolve any stacked switches at this depth */ }
     } else {
       ascendTo(target);
-      maybeSwitchGas(depth);
+      while (maybeSwitchGas(depth)) { /* resolve any stacked switches at this depth */ }
     }
   }
 

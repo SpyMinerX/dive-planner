@@ -2,7 +2,7 @@
  * app.js — Abyss dive planner UI: routing, planner, logbook, settings, PWA.
  */
 
-import { Tissues, makeGas, gasName, mod, planDive, replayProfile, surfaceInterval, SURFACE_PRESSURE } from './deco.js';
+import { Tissues, makeGas, gasName, mod, minDepth, MIN_PPO2, planDive, replayProfile, surfaceInterval, depthToPressure, SURFACE_PRESSURE } from './deco.js';
 import { parseUDDF, exportUDDF } from './uddf.js';
 import * as store from './store.js';
 import * as cloud from './sync.js';
@@ -60,14 +60,22 @@ function diveEndTime(dive) {
 
 const FULL_DESAT_MIN = 48 * 60;
 
+/**
+ * Two-track chaining: real dives chain only off other real dives, so a planned
+ * dive sitting in the book never distorts actual saturation. Planned dives
+ * chain off everything before them (real + earlier plans) — the projection.
+ */
 function recomputeChain() {
-  let tissues = null;
-  let lastEnd = null;
+  let lastReal = null; // { tissues, end } after the last real dive
+  let lastAny = null;  // … after the last dive of any kind
   for (const dive of logbook) {
-    let start = tissues;
+    const isPlan = dive.source === 'plan';
+    const base = isPlan ? lastAny : lastReal;
+
+    let start = base?.tissues || null;
     let si = dive.surfaceIntervalMin;
-    if (si == null && dive.datetime && lastEnd) {
-      si = Math.max(0, (new Date(dive.datetime) - lastEnd) / 60000);
+    if (si == null && dive.datetime && base?.end) {
+      si = Math.max(0, (new Date(dive.datetime) - base.end) / 60000);
     }
     if (start) {
       if (si == null || si >= FULL_DESAT_MIN) start = null;
@@ -82,41 +90,101 @@ function recomputeChain() {
       surfacingGF: res.tissues.surfacingGF(),
       repetitive: !!start,
     };
-    tissues = res.tissues;
-    lastEnd = diveEndTime(dive) || null;
+    const state = { tissues: res.tissues, end: diveEndTime(dive) || null };
+    lastAny = state;
+    if (!isPlan) lastReal = state;
   }
   store.saveLogbook(logbook);
 }
 
-/** Residual tissue state right now (or null if fully desaturated / empty book). */
-function currentResidual() {
-  const last = logbook[logbook.length - 1];
+/**
+ * Residual tissue state right now — or, when the chain ends with planned
+ * dives in the future, the projected state at the end of the last one.
+ * mode 'real' considers only actual dives (current saturation);
+ * mode 'all' includes planned dives (projected saturation).
+ * Returns null if fully desaturated / empty book.
+ */
+function currentResidual(mode = 'all') {
+  let last = null;
+  for (let i = logbook.length - 1; i >= 0; i--) {
+    if (mode === 'all' || logbook[i].source !== 'plan') { last = logbook[i]; break; }
+  }
   if (!last || !last.computed) return null;
   const end = diveEndTime(last);
-  const elapsedMin = end ? (Date.now() - end.getTime()) / 60000 : null;
-  if (elapsedMin != null && (elapsedMin < 0 || elapsedMin >= FULL_DESAT_MIN)) return null;
+  let elapsedMin = end ? (Date.now() - end.getTime()) / 60000 : null;
+  const future = elapsedMin != null && elapsedMin < 0;
+  if (future) elapsedMin = 0; // last dive hasn't happened yet — state at its surfacing
+  if (elapsedMin != null && elapsedMin >= FULL_DESAT_MIN) return null;
   let tissues = Tissues.fromJSON(last.computed.tissuesEnd);
   tissues.surfaceP = settings.surfacePressure;
   if (elapsedMin != null && elapsedMin > 0) tissues = surfaceInterval(tissues, elapsedMin, settings.surfacePressure);
   if (tissues.surfacingGF() < 1) return null;
-  return { tissues, sinceMin: elapsedMin, dive: last };
+  return { tissues, sinceMin: future ? null : elapsedMin, dive: last, future, end };
+}
+
+/** Surface rest (minutes, 30-min resolution) until tissues are fully desaturated. */
+function desatMinutes(tissues) {
+  let t = tissues.clone();
+  let min = 0;
+  while (min < FULL_DESAT_MIN && t.surfacingGF() >= 1) {
+    t = surfaceInterval(t, 30, settings.surfacePressure);
+    min += 30;
+  }
+  return min;
 }
 
 /* ------------------------------- routing ------------------------------ */
 
 const routes = ['dashboard', 'planner', 'logbook', 'settings'];
+let pendingLogbookDetailId = null;
 
+/**
+ * Signed-out visitors only ever see the landing page — the tab bar itself is
+ * hidden, and whatever hash is in the URL is ignored until they sign in.
+ * Signing in (or out) re-runs this and swaps the whole app in or out.
+ */
 function route() {
+  const authed = !!cloud.getAccount();
+  $('#main-nav').classList.toggle('nav-hidden', !authed);
+
+  if (!authed) {
+    for (const r of routes) $(`#view-${r}`).classList.remove('active');
+    $$('.nav a').forEach(a => a.classList.remove('active'));
+    $('#view-landing').classList.add('active');
+    window.scrollTo(0, 0);
+    return;
+  }
+  $('#view-landing').classList.remove('active');
+
   const hash = location.hash.replace(/^#\//, '') || 'dashboard';
   const name = routes.includes(hash) ? hash : 'dashboard';
   for (const r of routes) {
     $(`#view-${r}`).classList.toggle('active', r === name);
   }
   $$('.nav a').forEach(a => a.classList.toggle('active', a.dataset.route === name));
-  if (name === 'dashboard') renderDashboard();
-  if (name === 'logbook') renderLogbook();
-  if (name === 'planner') refreshResidualHint();
   window.scrollTo(0, 0);
+
+  if (name === 'dashboard') renderDashboard();
+  if (name === 'logbook') {
+    if (pendingLogbookDetailId) {
+      const id = pendingLogbookDetailId;
+      pendingLogbookDetailId = null;
+      showDiveDetail(id);
+    } else {
+      renderLogbook();
+    }
+  }
+  if (name === 'planner') { refreshResidualHint(); refreshSafetyStopHint(); }
+}
+
+/** Navigate to (and reveal) a dive's detail view, switching to the logbook route first if needed. */
+function goToDiveDetail(id) {
+  if (location.hash === '#/logbook') {
+    showDiveDetail(id);
+  } else {
+    pendingLogbookDetailId = id;
+    location.hash = '#/logbook';
+  }
 }
 
 /* ------------------------------ dashboard ----------------------------- */
@@ -134,22 +202,40 @@ function renderDashboard() {
     <div class="tile"><span class="tile-value">${totalMin ? fmtDur(totalMin) : '—'}</span><span class="tile-label">time underwater</span></div>
     <div class="tile"><span class="tile-value">${last ? fmtDate(last.datetime).split(' · ')[0] : '—'}</span><span class="tile-label">last dive</span></div>`;
 
-  const residual = currentResidual();
+  // --- current saturation: real dives only, off-gassing live ---
+  const cur = currentResidual('real');
   const hint = $('#dash-tissue-hint');
   const meter = $('#dash-gf-meter');
   const chartBox = $('#dash-tissue-chart');
-  if (residual) {
-    hint.textContent = residual.sinceMin != null
-      ? `Based on your last dive, ${fmtDur(residual.sinceMin)} ago. Compartments still off-gassing.`
+  const nReal = logbook.filter(d => d.source !== 'plan').length;
+  if (cur) {
+    const desat = desatMinutes(cur.tissues);
+    hint.textContent = cur.sinceMin != null
+      ? `Live — based on your last dive, ${fmtDur(cur.sinceMin)} ago. Fully desaturated in ≈ ${fmtDur(desat)}.`
       : 'Based on your last logged dive (no timestamp — interval unknown).';
-    renderGFMeter(meter, residual.tissues.surfacingGF());
-    renderTissueChart(chartBox, residual.tissues);
+    renderGFMeter(meter, cur.tissues.surfacingGF());
+    renderTissueChart(chartBox, cur.tissues);
   } else {
-    hint.textContent = nDives
+    hint.textContent = nReal
       ? 'Fully desaturated — all compartments back at air equilibrium.'
       : 'No dives yet. Import a UDDF logbook or plan your first dive.';
     meter.innerHTML = '';
     renderTissueChart(chartBox, new Tissues(settings.surfacePressure));
+  }
+
+  // --- planned saturation: projection at the end of the planned chain ---
+  const plannedBlock = $('#dash-planned-block');
+  const upcoming = logbook.filter(d => d.source === 'plan' && (e => e && e > new Date())(diveEndTime(d)));
+  const proj = upcoming.length ? currentResidual('all') : null;
+  if (proj && proj.future) {
+    plannedBlock.hidden = false;
+    const desat = desatMinutes(proj.tissues);
+    $('#dash-planned-hint').textContent =
+      `After your ${upcoming.length} planned dive${upcoming.length > 1 ? 's' : ''}, ` +
+      `ending ${fmtDate(proj.end.toISOString())}: you'll need ≈ ${fmtDur(desat)} of surface rest to fully desaturate.`;
+    renderGFMeter($('#dash-planned-meter'), proj.tissues.surfacingGF());
+  } else {
+    plannedBlock.hidden = true;
   }
 
   const recent = $('#dash-recent');
@@ -164,7 +250,43 @@ function renderDashboard() {
 /* ------------------------------ planner ------------------------------- */
 
 let segRows = [{ depth: 30, time: 25 }];
-let gasRows = [{ o2: 21, he: 0, use: 'bottom', switchDepth: null }];
+let gasRows = [{ o2: 21, he: 0, use: 'bottom', switchDepth: null, switchAuto: true }];
+
+// 'travel' and 'bottom' share one descent-side chain (see deco.js); 'deco' is
+// the ascent-side chain; 'bailout' is carried but never actually breathed.
+const CHAIN_ROLES = ['travel', 'bottom'];
+
+/**
+ * Best switch depth for a gas row, rounded to a 3 m stop:
+ *  - deco gases switch UP as deep as their ppO2 limit allows (more O2, sooner)
+ *  - a non-primary travel/bottom gas (a leaner/hypoxic mix reached via a
+ *    shallower travel gas) switches DOWN no shallower than the depth it
+ *    stops being hypoxic
+ * Returns 0 for a travel/bottom gas that was never hypoxic in the first place.
+ */
+function suggestSwitchDepth(role, gasObj) {
+  if (role === 'deco') {
+    const modDeco = mod(gasObj, settings.ppO2MaxDeco, settings.surfacePressure);
+    return Math.max(3, Math.floor(modDeco / 3) * 3);
+  }
+  const floor = minDepth(gasObj, MIN_PPO2, settings.surfacePressure);
+  return floor <= 0 ? 0 : Math.max(3, Math.ceil(floor / 3) * 3);
+}
+
+/**
+ * Which travel/bottom row is breathed at the surface: whichever is safe the
+ * shallowest (lowest ppO₂-floor depth), not just whichever was added first —
+ * so adding a travel gas after an already-hypoxic bottom gas still works,
+ * instead of requiring it to be reordered to the front.
+ */
+function primaryBottomRow(chainRows) {
+  let best = chainRows[0], bestFloor = Infinity;
+  for (const g of chainRows) {
+    const floor = minDepth(makeGas(g.o2 / 100, g.he / 100), MIN_PPO2, settings.surfacePressure);
+    if (floor < bestFloor) { best = g; bestFloor = floor; }
+  }
+  return best;
+}
 
 function renderSegRows() {
   const box = $('#plan-segments');
@@ -182,25 +304,75 @@ function renderSegRows() {
   });
 }
 
+/** ppO2 (bar) a gas gives at a given depth, at the current surface pressure. */
+function ppO2At(depth, gasObj) {
+  return depthToPressure(depth, settings.surfacePressure) * gasObj.o2;
+}
+
+/**
+ * Order gasRows the way they'll actually be breathed: the surface (primary)
+ * travel/bottom gas, then its deeper chain members shallowest-switch-in
+ * first, then deco gases deepest-switch first (the order you ascend through
+ * them), then bailout last. Runs before every render so the list re-sorts
+ * itself as roles/depths change instead of staying in add-order.
+ */
+function sortGasRows(primary) {
+  const bucket = g => (g.use === 'bailout' ? 3 : g.use === 'deco' ? 2 : g === primary ? 0 : 1);
+  gasRows.sort((a, b) => {
+    const ba = bucket(a), bb = bucket(b);
+    if (ba !== bb) return ba - bb;
+    if (ba === 1) return (a.switchDepth ?? 0) - (b.switchDepth ?? 0);
+    if (ba === 2) return (b.switchDepth ?? 0) - (a.switchDepth ?? 0);
+    return 0;
+  });
+}
+
+// renderGasRows() deliberately does NOT sort on every call — resorting after
+// every keystroke would make a row jump out from under you between two edits
+// of the same row (e.g. set O2 then He). Callers that represent a natural
+// checkpoint (add/remove a gas, about to calculate) call sortGasRows() first.
 function renderGasRows() {
   const box = $('#plan-gases');
+  const primary = primaryBottomRow(gasRows.filter(g => CHAIN_ROLES.includes(g.use)));
+
   box.innerHTML = gasRows.map((g, i) => {
     const gas = makeGas(g.o2 / 100, g.he / 100);
     const modBottom = mod(gas, settings.ppO2MaxBottom, settings.surfacePressure);
     const modDeco = mod(gas, settings.ppO2MaxDeco, settings.surfacePressure);
+    const isChain = CHAIN_ROLES.includes(g.use);
+    const isPrimary = isChain && g === primary;
+    const needsSwitch = g.use === 'deco' || (isChain && !isPrimary);
+    if (needsSwitch && g.switchAuto !== false) g.switchDepth = suggestSwitchDepth(g.use, gas);
+
+    const hypoxicAtSurface = isPrimary && settings.surfacePressure * gas.o2 < MIN_PPO2;
+    const modText = (depth) => `MOD ${depth.toFixed(0)} m (ppO₂ ${ppO2At(depth, gas).toFixed(2)})`;
+    const switchText = () => `switch ${(g.switchDepth ?? 0).toFixed(0)} m (ppO₂ ${ppO2At(g.switchDepth ?? 0, gas).toFixed(2)})`;
+    const note = g.use === 'bailout'
+      ? `${gas.name} · ${modText(modBottom)} · carried as bailout, not breathed in this plan`
+      : g.use === 'deco'
+        ? `${gas.name} · ${switchText()} · ${modText(modDeco)}`
+        : isPrimary
+          ? `${gas.name} · ${modText(modBottom)}`
+          : `${gas.name} · ${switchText()} · ${modText(modBottom)}`;
+
     return `
     <div class="row gas-row" data-i="${i}">
       <label>O₂ % <input type="number" class="gas-o2" min="5" max="100" step="1" value="${g.o2}"></label>
       <label>He % <input type="number" class="gas-he" min="0" max="90" step="1" value="${g.he}"></label>
       <label>Role <select class="gas-use">
+        <option value="travel" ${g.use === 'travel' ? 'selected' : ''}>Travel</option>
         <option value="bottom" ${g.use === 'bottom' ? 'selected' : ''}>Bottom</option>
         <option value="deco" ${g.use === 'deco' ? 'selected' : ''}>Deco</option>
+        <option value="bailout" ${g.use === 'bailout' ? 'selected' : ''}>Bailout</option>
       </select></label>
-      <label class="gas-switch-wrap" ${g.use === 'deco' ? '' : 'hidden'}>Switch (m)
-        <input type="number" class="gas-switch" min="3" max="60" step="3" value="${g.switchDepth ?? Math.max(3, Math.floor(modDeco / 3) * 3)}">
+      <label class="gas-switch-wrap" ${needsSwitch ? '' : 'hidden'}>
+        <span>Switch (m)${g.switchAuto !== false ? ' <span class="auto-tag" title="Automatically suggested from the ppO₂ limits">auto</span>' : ''}</span>
+        <input type="number" class="gas-switch" min="0" max="120" step="3" value="${g.switchDepth ?? 0}">
       </label>
-      <span class="row-note">${gas.name} · MOD ${(g.use === 'deco' ? modDeco : modBottom).toFixed(0)} m</span>
+      <span class="row-note">${note}</span>
+      ${needsSwitch && g.switchAuto === false ? '<button type="button" class="btn btn-ghost btn-sm gas-switch-reset" title="Reset to the suggested depth">↺ Auto</button>' : ''}
       ${gasRows.length > 1 ? '<button class="btn btn-icon row-del" title="Remove gas">✕</button>' : ''}
+      ${hypoxicAtSurface ? '<span class="row-warn">⚠ Hypoxic at the surface — add a Travel gas (or another Bottom gas) that clears the surface: whichever is safe there is used automatically, in any order, and this one’s switch depth is then suggested for you.</span>' : ''}
     </div>`;
   }).join('');
 
@@ -210,23 +382,78 @@ function renderGasRows() {
       gasRows[i].o2 = +row.querySelector('.gas-o2').value || 21;
       gasRows[i].he = +row.querySelector('.gas-he').value || 0;
       gasRows[i].use = row.querySelector('.gas-use').value;
-      const sw = row.querySelector('.gas-switch');
-      gasRows[i].switchDepth = gasRows[i].use === 'deco' ? (+sw.value || 21) : null;
       renderGasRows();
     };
-    row.querySelectorAll('input,select').forEach(inp => inp.addEventListener('change', sync));
+    row.querySelectorAll('.gas-o2, .gas-he, .gas-use').forEach(inp => inp.addEventListener('change', sync));
+    row.querySelector('.gas-switch')?.addEventListener('change', e => {
+      gasRows[i].switchDepth = +e.target.value || 0;
+      gasRows[i].switchAuto = false;
+      renderGasRows();
+    });
+    row.querySelector('.gas-switch-reset')?.addEventListener('click', () => {
+      gasRows[i].switchAuto = true;
+      renderGasRows();
+    });
     row.querySelector('.row-del')?.addEventListener('click', () => { gasRows.splice(i, 1); renderGasRows(); });
   });
+}
+
+/**
+ * Tidy gasRows into dive order, then render. Only called right before
+ * calculating a plan — adding/editing gases must never resort on its own, or
+ * a row you've already set up (e.g. a bailout gas sorted last) can get
+ * silently displaced by whatever you're adding or editing next.
+ */
+function sortAndRenderGasRows() {
+  sortGasRows(primaryBottomRow(gasRows.filter(g => CHAIN_ROLES.includes(g.use))));
+  renderGasRows();
+}
+
+function toLocalDT(date) {
+  const p = n => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}T${p(date.getHours())}:${p(date.getMinutes())}`;
+}
+
+function plannedStartDate() {
+  const v = $('#plan-start').value;
+  const d = v ? new Date(v) : new Date();
+  return isNaN(d) ? new Date() : d;
+}
+
+/** SI between the last logbook dive and the planned start (null if last dive undated). */
+function siFromPlannedStart() {
+  const last = logbook[logbook.length - 1];
+  const lastEnd = last ? diveEndTime(last) : null;
+  if (!lastEnd) return null;
+  return Math.max(0, (plannedStartDate() - lastEnd) / 60000);
 }
 
 function refreshResidualHint() {
   const residual = currentResidual();
   const hint = $('#plan-residual-hint');
   const check = $('#plan-use-residual');
+
+  // default planned start: an hour after the last dive ends, never in the past
+  if (!$('#plan-start').value) {
+    const last = logbook[logbook.length - 1];
+    const lastEnd = last ? diveEndTime(last) : null;
+    const def = new Date(Math.max(Date.now(), lastEnd ? lastEnd.getTime() + 60 * 60000 : 0));
+    $('#plan-start').value = toLocalDT(def);
+  }
+
   if (residual) {
     check.disabled = false;
-    hint.textContent = `Last dive ${residual.sinceMin != null ? fmtDur(residual.sinceMin) + ' ago' : 'has no timestamp'} — surfacing gradient now ${residual.tissues.surfacingGF().toFixed(0)} %.`;
-    if (residual.sinceMin != null) $('#plan-si').value = Math.round(residual.sinceMin);
+    const si = siFromPlannedStart();
+    $('#plan-si-wrap').hidden = si != null || !check.checked;
+    if (si != null) {
+      const lastLabel = residual.future ? 'Your last planned dive ends' : 'Your last dive ended';
+      hint.textContent = `${lastLabel} ${fmtDate(diveEndTime(residual.dive).toISOString())} — ` +
+        `surface interval to the planned start: ${fmtDur(si)}. ` +
+        `Surfacing gradient at the end of the chain: ${residual.tissues.surfacingGF().toFixed(0)} %.`;
+    } else {
+      hint.textContent = `Last dive has no timestamp — enter the surface interval manually. ` +
+        `Surfacing gradient: ${residual.tissues.surfacingGF().toFixed(0)} %.`;
+    }
   } else {
     check.checked = false;
     check.disabled = true;
@@ -240,13 +467,19 @@ function runPlan() {
     const gfLow = (+$('#plan-gf-low').value || 35) / 100;
     const gfHigh = (+$('#plan-gf-high').value || 75) / 100;
 
-    const bottom = gasRows.filter(g => g.use === 'bottom');
+    sortAndRenderGasRows(); // tidy the gas list into dive order now that setup is (presumably) done
+    const chain = gasRows.filter(g => CHAIN_ROLES.includes(g.use));
     const deco = gasRows.filter(g => g.use === 'deco').sort((a, b) => (b.switchDepth ?? 0) - (a.switchDepth ?? 0));
-    if (!bottom.length) { toast('Add at least one bottom gas.', 'warn'); return; }
-    const gases = [...bottom, ...deco].map(g => ({
+    const bailout = gasRows.filter(g => g.use === 'bailout');
+    if (!chain.length) { toast('Add at least one Travel or Bottom gas.', 'warn'); return; }
+    // whichever travel/bottom gas is safe at the surface is the one breathed
+    // there (no switch depth); any other one is a deeper/leaner mix reached
+    // via it and keeps its own switch depth — see the bottom-gas chain in deco.js.
+    const primary = primaryBottomRow(chain);
+    const gases = [...chain, ...deco, ...bailout].map(g => ({
       ...makeGas(g.o2 / 100, g.he / 100),
       use: g.use,
-      switchDepth: g.use === 'deco' ? g.switchDepth : null,
+      switchDepth: CHAIN_ROLES.includes(g.use) && g === primary ? null : g.switchDepth,
     }));
 
     let startTissues = null;
@@ -254,13 +487,18 @@ function runPlan() {
     if ($('#plan-use-residual').checked) {
       const last = logbook[logbook.length - 1];
       if (last?.computed) {
-        const si = Math.max(0, +$('#plan-si').value || 0);
+        const si = siFromPlannedStart() ?? Math.max(0, +$('#plan-si').value || 0);
         siUsed = si;
         let t = Tissues.fromJSON(last.computed.tissuesEnd);
         t.surfaceP = settings.surfacePressure;
         startTissues = si > 0 ? surfaceInterval(t, si, settings.surfacePressure) : t;
       }
     }
+
+    // safety stop is a global setting (Settings tab), not a per-plan toggle
+    const safetyStopOn = settings.safetyStopEnabled;
+    const safetyStopDepth = safetyStopOn ? settings.safetyStopDepth : null;
+    const safetyStopMin = safetyStopOn ? settings.safetyStopMin : 0;
 
     const segments = segRows.map(s => ({ depth: +s.depth, time: +s.time }));
     const plan = planDive({
@@ -274,14 +512,122 @@ function runPlan() {
       ppO2MaxBottom: settings.ppO2MaxBottom,
       ppO2MaxDeco: settings.ppO2MaxDeco,
       startTissues,
+      safetyStopDepth,
+      safetyStopMin,
     });
     lastPlan = plan;
-    lastPlanInputs = { segments, gases, gfLow, gfHigh, siUsed, residual: !!startTissues };
+    lastPlanInputs = {
+      segments, gases, gfLow, gfHigh, siUsed, residual: !!startTissues, plannedStart: plannedStartDate(),
+      safetyStop: safetyStopOn ? { depth: safetyStopDepth, min: safetyStopMin } : null,
+    };
     renderPlanResults(plan, gases);
   } catch (e) {
     console.error(e);
     toast(`Planning failed: ${e.message}`, 'error');
   }
+}
+
+const SCHED_ICON = { descent: '↓', 'level-change': '↳', bottom: '■', ascent: '↑', stop: '◦' };
+
+/**
+ * Fold zero-duration 'switch' entries into the row that follows them, so a
+ * gas change reads as a small ⇄ marker on that row's gas chip instead of its
+ * own line — the schedule for a multi-gas plan can have a switch at nearly
+ * every stop, and a dedicated row each time turns it into a wall of text.
+ */
+function foldSwitches(schedule) {
+  const out = [];
+  let pending = null;
+  for (const s of schedule) {
+    if (s.type === 'switch') { pending = s; continue; }
+    out.push({ s, switched: !!pending });
+    pending = null;
+  }
+  if (pending) out.push({ s: pending, switched: false, standalone: true }); // trailing switch, nothing to attach to
+  return out;
+}
+
+/** Schedule table (thead+tbody) for either a live plan (`s.gas.name`) or a saved one (`s.gasName`). */
+function scheduleTableHtml(schedule, gasNameOf) {
+  const rows = foldSwitches(schedule).map(({ s, switched, standalone }) => {
+    const depthText = standalone || ['descent', 'ascent', 'level-change'].includes(s.type)
+      ? (standalone ? `${s.to.toFixed(0)} m` : `${s.from.toFixed(0)} → ${s.to.toFixed(0)} m`)
+      : `${s.to.toFixed(0)} m`;
+    const durText = standalone || !s.duration ? '—' : s.duration < 0.95 ? `${Math.round(s.duration * 60)} s` : fmtDur(s.duration);
+    const phase = standalone ? 'gas switch' : s.type.replace('-', ' ');
+    const icon = standalone ? '⇄' : (SCHED_ICON[s.type] || '');
+    const gasChip = `${switched ? '<span class="switch-mark" title="Gas switch">⇄</span> ' : ''}<span class="gas-chip">${escapeHtml(gasNameOf(s))}</span>`;
+    return `<tr class="sched-${standalone ? 'switch' : s.type}">
+      <td>${icon} ${phase}</td>
+      <td>${depthText}</td>
+      <td>${durText}</td>
+      <td>${Math.ceil(s.runtime)}</td>
+      <td>${gasChip}</td>
+    </tr>`;
+  }).join('');
+  return `<thead><tr><th>Phase</th><th>Depth</th><th>Duration</th><th>Runtime (min)</th><th>Gas</th></tr></thead><tbody>${rows}</tbody>`;
+}
+
+/**
+ * Merge gas-usage rows that are actually the same mix (e.g. a travel gas
+ * that's also carried as bailout, or two deco rows set to the same blend)
+ * into one line, summing their litres — a physical cylinder doesn't care
+ * which role the planner assigned its gas. Keeps first-seen order.
+ */
+function mergeGasUsage(gases, gasUsage) {
+  const order = [];
+  const byMix = new Map();
+  gases.forEach((g, i) => {
+    const key = `${g.o2}|${g.he}`;
+    const modHere = mod(g, g.use === 'deco' ? settings.ppO2MaxDeco : settings.ppO2MaxBottom, settings.surfacePressure);
+    let entry = byMix.get(key);
+    if (!entry) {
+      entry = { name: g.name, litres: 0, mod: modHere, hasBailout: false, hasOther: false };
+      byMix.set(key, entry);
+      order.push(entry);
+    }
+    entry.litres += gasUsage[i];
+    entry.mod = Math.min(entry.mod, modHere);
+    if (g.use === 'bailout') entry.hasBailout = true; else entry.hasOther = true;
+  });
+  return order;
+}
+
+/**
+ * Final display rows for the "Gas requirements" table — merged by mix, with
+ * litres already rounded to the ×10 L convention used everywhere else. This
+ * is the shape saved onto a planned dive (see savePlanToLogbook), so the same
+ * table can be redrawn later from the logbook without re-running the plan.
+ */
+function gasUsageRows(gases, gasUsage) {
+  return mergeGasUsage(gases, gasUsage)
+    .filter(({ litres, hasBailout }) => litres >= 1 || hasBailout)
+    .map(({ name, mod: modDepth, litres, hasBailout }) => ({
+      name,
+      mod: Math.round(modDepth),
+      required: litres < 1 ? null : Math.ceil(litres / 10) * 10,
+      reserve: litres < 1 ? null : Math.ceil(litres * 1.5 / 10) * 10,
+      hasBailout,
+    }));
+}
+
+function gasUsageRowHtml(row) {
+  // dives saved before the table gained MOD/reserve columns only stored {name, litres} —
+  // fall back gracefully instead of showing "undefined" for those.
+  const modDepth = row.mod ?? null;
+  const required = row.required !== undefined ? row.required : (row.litres >= 1 ? Math.ceil(row.litres / 10) * 10 : null);
+  const reserve = row.reserve !== undefined ? row.reserve : (row.litres >= 1 ? Math.ceil(row.litres * 1.5 / 10) * 10 : null);
+  const nameHtml = `<span class="gas-chip">${escapeHtml(row.name)}</span>${row.hasBailout && required != null ? ' <span class="row-note">(also bailout)</span>' : ''}`;
+  if (required == null) {
+    return `<tr><td>${nameHtml}</td><td>${modDepth != null ? modDepth + ' m' : '—'}</td><td colspan="2">Carried as bailout — not breathed in this plan</td></tr>`;
+  }
+  return `<tr><td>${nameHtml}</td><td>${modDepth != null ? modDepth + ' m' : '—'}</td><td>${required} L</td><td>${reserve} L</td></tr>`;
+}
+
+/** Gas requirements table (thead+tbody) from already-computed rows (see gasUsageRows). */
+function gasUsageTableHtml(rows) {
+  return `<thead><tr><th>Gas</th><th>MOD</th><th>Required</th><th>With ⅓ reserve ×1.5</th></tr></thead>
+    <tbody>${rows.map(gasUsageRowHtml).join('')}</tbody>`;
 }
 
 function renderPlanResults(plan, gases) {
@@ -309,33 +655,11 @@ function renderPlanResults(plan, gases) {
     .map(s => ({ t: s.runtime, depth: s.from, type: 'gas-switch', label: s.gas.name }));
   renderProfileChart($('#plan-chart'), plan.profile, { events });
 
-  const icons = { descent: '↓', 'level-change': '↳', bottom: '■', ascent: '↑', stop: '◦', switch: '⇄' };
-  const rows = plan.schedule.map(s => `
-    <tr class="sched-${s.type}">
-      <td>${icons[s.type] || ''} ${s.type === 'switch' ? 'gas switch' : s.type.replace('-', ' ')}</td>
-      <td>${s.type === 'descent' || s.type === 'ascent' || s.type === 'level-change'
-        ? `${s.from.toFixed(0)} → ${s.to.toFixed(0)} m` : `${s.to.toFixed(0)} m`}</td>
-      <td>${!s.duration ? '—' : s.duration < 0.95 ? `${Math.round(s.duration * 60)} s` : fmtDur(s.duration)}</td>
-      <td>${Math.ceil(s.runtime)}</td>
-      <td><span class="gas-chip">${escapeHtml(s.gas.name)}</span></td>
-    </tr>`).join('');
-  $('#plan-schedule').innerHTML = `
-    <thead><tr><th>Phase</th><th>Depth</th><th>Duration</th><th>Runtime (min)</th><th>Gas</th></tr></thead>
-    <tbody>${rows}</tbody>`;
+  $('#plan-schedule').innerHTML = scheduleTableHtml(plan.schedule, s => s.gas.name);
 
   renderTissueChart($('#plan-tissue-chart'), plan.tissuesEnd);
 
-  const gasRowsHtml = gases.map((g, i) => {
-    const litres = plan.gasUsage[i];
-    if (litres < 1) return '';
-    return `<tr><td><span class="gas-chip">${escapeHtml(g.name)}</span></td>
-      <td>${mod(g, g.use === 'deco' ? settings.ppO2MaxDeco : settings.ppO2MaxBottom, settings.surfacePressure).toFixed(0)} m</td>
-      <td>${Math.ceil(litres / 10) * 10} L</td>
-      <td>${Math.ceil(litres * 1.5 / 10) * 10} L</td></tr>`;
-  }).join('');
-  $('#plan-gas-table').innerHTML = `
-    <thead><tr><th>Gas</th><th>MOD</th><th>Required</th><th>With ⅓ reserve ×1.5</th></tr></thead>
-    <tbody>${gasRowsHtml}</tbody>`;
+  $('#plan-gas-table').innerHTML = gasUsageTableHtml(gasUsageRows(gases, plan.gasUsage));
 
   $('#plan-results').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -351,14 +675,34 @@ function savePlanToLogbook() {
   const maxD = Math.max(...lastPlanInputs.segments.map(s => s.depth));
   const dive = {
     id: store.newId(),
-    datetime: new Date().toISOString(),
+    datetime: (lastPlanInputs.plannedStart || new Date()).toISOString(),
     name: `Plan ${maxD} m / ${Math.round(lastPlanInputs.segments.reduce((s, x) => s + x.time, 0))} min`,
     site: '',
     notes: `Planned with GF ${Math.round(lastPlanInputs.gfLow * 100)}/${Math.round(lastPlanInputs.gfHigh * 100)}` +
-      (lastPlanInputs.residual ? ` · repetitive (SI ${fmtDur(lastPlanInputs.siUsed)})` : ''),
+      (lastPlanInputs.residual ? ` · repetitive (SI ${fmtDur(lastPlanInputs.siUsed)})` : '') +
+      (lastPlanInputs.safetyStop ? ` · safety stop ${lastPlanInputs.safetyStop.depth} m / ${lastPlanInputs.safetyStop.min} min` : ''),
     source: 'plan',
     events: lastPlan.schedule.filter(s => s.type === 'switch')
       .map(s => ({ t: +s.runtime.toFixed(2), type: 'gas-switch', label: s.gas.name })),
+    // full plan details, shown in the logbook and kept after "replace with actual"
+    plan: {
+      gfLow: Math.round(lastPlanInputs.gfLow * 100),
+      gfHigh: Math.round(lastPlanInputs.gfHigh * 100),
+      runtime: lastPlan.runtime,
+      tts: lastPlan.tts,
+      firstStop: lastPlan.firstStop,
+      ndl: lastPlan.ndl,
+      cns: lastPlan.cns,
+      otu: lastPlan.otu,
+      surfacingGF: lastPlan.surfacingGF,
+      isDecoDive: lastPlan.isDecoDive,
+      schedule: lastPlan.schedule.map(s => ({
+        type: s.type, from: s.from, to: s.to,
+        duration: +s.duration.toFixed(2), runtime: +s.runtime.toFixed(2),
+        gasName: s.gas.name,
+      })),
+      gasUsage: gasUsageRows(lastPlanInputs.gases, lastPlan.gasUsage),
+    },
     maxDepth: Math.max(...samples.map(s => s.depth)),
     duration: lastPlan.runtime,
     surfaceIntervalMin: lastPlanInputs.residual ? lastPlanInputs.siUsed : null,
@@ -397,6 +741,7 @@ function diveCardHtml(d) {
       ${gf != null ? `<span class="gf-chip gf-${gfClass}" title="Surfacing gradient factor">GF ${gf.toFixed(0)}%</span>` : ''}
       ${nEvents ? `<span class="src-chip evt" title="Logged events">${nEvents} event${nEvents > 1 ? 's' : ''}</span>` : ''}
       ${planned ? '<span class="plan-chip" title="Planned dive — not yet dived">◈ PLANNED</span>' : ''}
+      ${!planned && d.plan ? '<span class="src-chip ok" title="Planned dive replaced with actual data">✓ dived</span>' : ''}
       ${d.computed?.repetitive ? '<span class="src-chip rep">repetitive</span>' : ''}
     </div>
   </button>`;
@@ -430,7 +775,7 @@ function diveEvents(dive, samples) {
 
 function bindDiveCards(root) {
   root.querySelectorAll('.dive-card').forEach(c =>
-    c.addEventListener('click', () => showDiveDetail(c.dataset.id)));
+    c.addEventListener('click', () => goToDiveDetail(c.dataset.id)));
 }
 
 function renderLogbook() {
@@ -501,8 +846,41 @@ function showDiveDetail(id) {
       <p class="card-hint">Gases: ${escapeHtml(gasesLabel(dive.gases))}</p>
       <div id="detail-chart" class="chart-box"></div>
     </div>
+    ${dive.plan ? `
+    <div class="card plan-card">
+      <h2>${planned ? 'Planned schedule' : 'Original plan'} — GF ${dive.plan.gfLow}/${dive.plan.gfHigh}</h2>
+      <div class="tile-row">
+        <div class="tile"><span class="tile-value">${fmtDur(dive.plan.runtime)}</span><span class="tile-label">runtime</span></div>
+        <div class="tile"><span class="tile-value">${dive.plan.isDecoDive ? fmtDur(dive.plan.tts) : '—'}</span><span class="tile-label">deco (TTS)</span></div>
+        <div class="tile"><span class="tile-value">${dive.plan.isDecoDive ? dive.plan.firstStop + ' m' : 'no stop'}</span><span class="tile-label">first stop</span></div>
+        <div class="tile"><span class="tile-value">${dive.plan.surfacingGF.toFixed(0)} %</span><span class="tile-label">surfacing GF</span></div>
+        <div class="tile"><span class="tile-value">${dive.plan.cns.toFixed(0)} %</span><span class="tile-label">CNS</span></div>
+        <div class="tile"><span class="tile-value">${dive.plan.otu.toFixed(0)}</span><span class="tile-label">OTU</span></div>
+      </div>
+      <div class="table-scroll">
+        <table class="table">${scheduleTableHtml(dive.plan.schedule, s => s.gasName)}</table>
+      </div>
+      ${dive.plan.gasUsage?.length ? `
+      <h2 class="mt">Gas requirements</h2>
+      <div class="table-scroll">
+        <table class="table">${gasUsageTableHtml(dive.plan.gasUsage)}</table>
+      </div>` : ''}
+    </div>` : ''}
+
+    ${planned ? `
+    <div class="card replace-card">
+      <h2>Replace with actual dive data</h2>
+      <p class="card-hint">Dived this plan? Import the recorded dive from your dive computer (UDDF) —
+        the tissue chain and every following dive will then be computed from the real profile,
+        not the plan. Your current and planned saturation stay separate until then.</p>
+      <button type="button" class="btn btn-primary btn-sm" id="btn-replace-uddf">Import actual dive (UDDF)…</button>
+      <p class="card-hint">Tip: importing on the Logbook page also works — a dive recorded within
+        ±6 h of a plan's start replaces that plan automatically.</p>
+    </div>` : ''}
+
     <div class="card">
       <h2>Events</h2>
+      <p class="card-hint">Tip: tap a point on the profile above to set the event time automatically.</p>
       <div id="event-list"></div>
       <div class="row event-add">
         <label>Time (min) <input id="ev-time" type="number" min="0" step="0.5" max="${Math.ceil(dive.duration || 999)}"></label>
@@ -559,6 +937,47 @@ function showDiveDetail(id) {
     showDiveDetail(dive.id);
   });
 
+  // --- replace planned dive with an actual recorded dive (import only) ---
+  function applyActual(patch) {
+    logbook = store.updateDive(dive.id, {
+      ...patch, source: 'dive', events: patch.events ?? null, surfaceIntervalMin: null,
+    });
+    recomputeChain();
+    scheduleSync();
+    toast('Plan replaced with actual dive data — tissue chain recomputed.', 'ok');
+    showDiveDetail(dive.id);
+    renderDashboard();
+  }
+
+  if (planned) {
+    $('#btn-replace-uddf').addEventListener('click', () => {
+      const inp = document.createElement('input');
+      inp.type = 'file';
+      inp.accept = '.uddf,.xml,application/xml';
+      inp.onchange = () => {
+        const file = inp.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+          const { dives, errors } = parseUDDF(reader.result);
+          if (!dives.length) { toast(errors[0] || 'No dive found in that file.', 'error'); return; }
+          const d = dives[0];
+          applyActual({
+            datetime: d.datetime || dive.datetime,
+            maxDepth: d.maxDepth,
+            duration: d.duration,
+            gases: d.gases.map(g => ({ o2: g.o2, he: g.he, name: g.name })),
+            samples: d.samples,
+            gps: dive.gps || d.gps || null,
+          });
+          if (dives.length > 1) toast('File held several dives — used the first one.', 'warn');
+        };
+        reader.readAsText(file);
+      };
+      inp.click();
+    });
+  }
+
   // --- profile + tissues ---
   const gases = diveGasObjects(dive);
   const samples = (dive.samples || []).map(s => ({ t: s.t, depth: s.depth, gas: gases[Math.min(s.gasIdx || 0, gases.length - 1)] }));
@@ -578,7 +997,20 @@ function showDiveDetail(id) {
   const events = diveEvents(dive, samples)
     .map(e => ({ ...e, depth: e.depth ?? depthAt(samples, e.t) }))
     .sort((a, b) => a.t - b.t);
-  renderProfileChart($('#detail-chart'), res.profile, { events });
+  renderProfileChart($('#detail-chart'), res.profile, {
+    events,
+    // tap the timeline to prefill the add-event time
+    onTimeClick: t => {
+      const rounded = Math.round(t * 2) / 2;
+      $('#ev-time').value = rounded;
+      const addRow = $('.event-add');
+      addRow.classList.remove('flash');
+      void addRow.offsetWidth; // restart animation
+      addRow.classList.add('flash');
+      addRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      $('#ev-label').focus({ preventScroll: true });
+    },
+  });
   renderTissueChart($('#detail-tissues'), res.tissues);
 
   // --- events list ---
@@ -627,9 +1059,49 @@ function showDiveDetail(id) {
 
 /* --------------------------- import / export --------------------------- */
 
+const PLAN_MATCH_WINDOW_MS = 6 * 3600 * 1000;
+
+/**
+ * Imported dives that were recorded near a planned dive's start replace that
+ * plan (keeping its name/site/plan for comparison); the rest are added new.
+ * Returns how many plans were replaced.
+ */
+function absorbImportedDives(entries) {
+  let replaced = 0;
+  const taken = new Set();
+  const toAdd = [];
+  for (const e of entries) {
+    const match = e.datetime && logbook.find(p =>
+      p.source === 'plan' && !taken.has(p.id) && p.datetime &&
+      Math.abs(new Date(p.datetime) - new Date(e.datetime)) < PLAN_MATCH_WINDOW_MS);
+    if (match) {
+      taken.add(match.id);
+      logbook = store.updateDive(match.id, {
+        datetime: e.datetime,
+        maxDepth: e.maxDepth,
+        duration: e.duration,
+        gases: e.gases,
+        samples: e.samples,
+        gps: match.gps || e.gps || null,
+        site: match.site || e.site,
+        notes: match.notes || e.notes,
+        source: 'dive',
+        events: null,
+        surfaceIntervalMin: null,
+      });
+      replaced++;
+    } else {
+      toAdd.push(e);
+    }
+  }
+  logbook = toAdd.length ? store.addDives(toAdd) : store.loadLogbook();
+  return replaced;
+}
+
 function importFiles(files) {
   if (!files.length) return;
   let imported = 0;
+  let plansReplaced = 0;
   const allErrors = [];
   let pending = files.length;
 
@@ -652,14 +1124,16 @@ function importFiles(files) {
           gases: d.gases.map(g => ({ o2: g.o2, he: g.he, name: g.name })),
           samples: d.samples,
         }));
-        logbook = store.addDives(entries);
+        plansReplaced += absorbImportedDives(entries);
         imported += entries.length;
       }
       if (--pending === 0) {
         recomputeChain();
         scheduleSync();
         if (imported) {
-          toast(`Imported ${imported} dive${imported > 1 ? 's' : ''}. Tissue chains computed.`, 'ok');
+          toast(`Imported ${imported} dive${imported > 1 ? 's' : ''}` +
+            (plansReplaced ? ` — ${plansReplaced} replaced planned dive${plansReplaced > 1 ? 's' : ''}` : '') +
+            '. Tissue chains computed.', 'ok');
           location.hash = '#/logbook';
           renderLogbook();
           renderDashboard();
@@ -686,13 +1160,16 @@ function exportLogbook() {
 
 /* ------------------------------ settings ------------------------------ */
 
-const SETTING_FIELDS = ['gfLow', 'gfHigh', 'lastStopDepth', 'surfacePressure', 'descentRate', 'ascentRate', 'sacBottom', 'sacDeco', 'ppO2MaxBottom', 'ppO2MaxDeco'];
+const SETTING_FIELDS = ['gfLow', 'gfHigh', 'lastStopDepth', 'surfacePressure', 'descentRate', 'ascentRate', 'sacBottom', 'sacDeco', 'ppO2MaxBottom', 'ppO2MaxDeco', 'safetyStopDepth', 'safetyStopMin'];
 
 function renderSettings() {
   for (const f of SETTING_FIELDS) {
     const input = $(`#set-${f}`);
     if (input) input.value = settings[f];
   }
+  $('#set-safetyStopEnabled').checked = settings.safetyStopEnabled;
+  $('#set-safety-stop-wrap').hidden = !settings.safetyStopEnabled;
+  refreshSafetyStopHint();
 }
 
 function saveSettingsFromForm() {
@@ -703,17 +1180,33 @@ function saveSettingsFromForm() {
       if (Number.isFinite(v)) settings[f] = v;
     }
   }
+  settings.safetyStopEnabled = $('#set-safetyStopEnabled').checked;
   store.saveSettings(settings);
   store.touchSettings();
   recomputeChain();
+  renderGasRows(); // refresh MOD notes + auto-suggested switch depths for the new ppO₂/surface-pressure settings
+  refreshSafetyStopHint();
   scheduleSync();
   toast('Settings saved.', 'ok');
+}
+
+/** Safety-stop hint shown in the planner — the setting itself lives in Settings, not per plan. */
+function refreshSafetyStopHint() {
+  const hint = $('#plan-safety-stop-hint');
+  if (!hint) return;
+  hint.textContent = settings.safetyStopEnabled
+    ? `Safety stop: ${settings.safetyStopDepth} m for ${settings.safetyStopMin} min, added to every plan (change in Settings).`
+    : 'No safety stop configured — enable one in Settings to add it to every plan.';
 }
 
 /* --------------------------- cloud account ---------------------------- */
 
 let lastSyncAt = null;
 let syncTimer = null;
+let lastServerStamp = null; // server doc stamp after our last sync — drives change polling
+let syncInFlight = false;
+const SYNC_DEBOUNCE_MS = 400;
+const SYNC_POLL_MS = 10000;
 
 function refreshAccountUI() {
   const acc = cloud.getAccount();
@@ -721,6 +1214,7 @@ function refreshAccountUI() {
   $('#btn-account').classList.toggle('signed-in', !!acc);
   $('#account-signed-out').hidden = !!acc;
   $('#account-signed-in').hidden = !acc;
+  $('#btn-account-close').textContent = acc ? 'Close' : 'Cancel';
   if (acc) {
     $('#acc-current-email').textContent = acc.email;
     $('#acc-sync-info').textContent = lastSyncAt
@@ -737,15 +1231,17 @@ function refreshAccountUI() {
 function scheduleSync() {
   if (!cloud.getAccount()) return;
   clearTimeout(syncTimer);
-  syncTimer = setTimeout(() => doSync({ silent: true }), 1500);
+  syncTimer = setTimeout(() => doSync({ silent: true }), SYNC_DEBOUNCE_MS);
 }
 
 async function doSync({ silent = false } = {}) {
   const acc = cloud.getAccount();
-  if (!acc) return;
+  if (!acc || syncInFlight) return;
+  syncInFlight = true;
   try {
     const result = await cloud.syncLogbook(logbook, store.loadTombstones(), settings, store.settingsUpdatedAt());
     lastSyncAt = new Date();
+    lastServerStamp = result.serverUpdatedAt;
     if (result.settingsChanged) {
       // a newer settings edit from another device wins
       settings = { ...store.DEFAULT_SETTINGS, ...result.settings };
@@ -768,6 +1264,7 @@ async function doSync({ silent = false } = {}) {
     if (e.kind === 'expired') {
       cloud.dropAccount();
       refreshAccountUI();
+      route();
       toast(e.message, 'warn');
     } else if (!silent && e.kind === 'offline') {
       toast(e.message, 'warn');
@@ -775,8 +1272,29 @@ async function doSync({ silent = false } = {}) {
       toast(`Sync failed: ${e.message}`, 'error');
     }
     // offline in silent mode: ignore — the 'online' listener will retry
+  } finally {
+    syncInFlight = false;
   }
   refreshAccountUI();
+}
+
+/**
+ * Fast pull: poll the cheap /api/logbook/meta stamp and run a full sync only
+ * when another device changed something — keeps two open devices converging
+ * within seconds without hammering the server.
+ */
+async function pollRemoteChanges() {
+  if (!cloud.getAccount() || !navigator.onLine || document.hidden || syncInFlight) return;
+  try {
+    const meta = await cloud.remoteMeta();
+    if (meta.updatedAt && meta.updatedAt !== lastServerStamp) await doSync({ silent: true });
+  } catch { /* offline or expired — doSync paths handle those states */ }
+}
+
+function openAccountDialog() {
+  $('#account-error').hidden = true;
+  refreshAccountUI();
+  $('#account-dialog').showModal();
 }
 
 function initAccount() {
@@ -784,9 +1302,9 @@ function initAccount() {
   const errBox = $('#account-error');
   const showErr = msg => { errBox.textContent = msg; errBox.hidden = false; };
 
-  const openDialog = () => { errBox.hidden = true; refreshAccountUI(); dialog.showModal(); };
-  $('#btn-account').addEventListener('click', openDialog);
-  $('#btn-account-settings').addEventListener('click', openDialog);
+  $('#btn-account').addEventListener('click', openAccountDialog);
+  $('#btn-account-settings').addEventListener('click', openAccountDialog);
+  $('#btn-landing-signin').addEventListener('click', openAccountDialog);
   $('#btn-sync-now').addEventListener('click', () => doSync());
 
   const credentials = () => ({
@@ -794,7 +1312,7 @@ function initAccount() {
     password: $('#acc-password').value,
   });
 
-  async function doAuth(fn, label) {
+  async function doAuth(fn, label, isLogin) {
     const { email, password } = credentials();
     if (!email || password.length < 8) { showErr('Enter your email and a password of at least 8 characters.'); return; }
     try {
@@ -804,23 +1322,38 @@ function initAccount() {
       toast(`${label} as ${email}. Syncing logbook…`, 'ok');
       await doSync({ silent: true });
       refreshAccountUI();
+      dialog.close();
+      route();
     } catch (e) {
-      showErr(e.message);
+      // the server keeps "wrong password" and "no such account" indistinguishable
+      // on purpose (security) — nudge toward registering, since that's the far
+      // more common cause of a failed first sign-in.
+      showErr(isLogin && /wrong email or password/i.test(e.message)
+        ? `${e.message} Not registered yet? Use “Create account” instead.`
+        : e.message);
     }
   }
 
-  $('#btn-do-login').addEventListener('click', () => doAuth(cloud.login, 'Signed in'));
-  $('#btn-do-register').addEventListener('click', () => doAuth(cloud.register, 'Account created'));
+  $('#btn-do-login').addEventListener('click', () => doAuth(cloud.login, 'Signed in', true));
+  $('#btn-do-register').addEventListener('click', () => doAuth(cloud.register, 'Account created', false));
   $('#btn-do-logout').addEventListener('click', async () => {
     await cloud.logout();
     lastSyncAt = null;
+    $('#acc-email').value = '';
+    $('#acc-password').value = '';
     refreshAccountUI();
+    dialog.close();
+    route();
     toast('Signed out. The logbook stays on this device.', 'ok');
   });
   $('#btn-do-sync').addEventListener('click', () => doSync());
 
   // reconnects push local changes up automatically
   window.addEventListener('online', () => doSync({ silent: true }));
+  // returning to the tab pulls the latest state immediately
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) pollRemoteChanges(); });
+  // steady change-poll keeps simultaneously open devices in step
+  setInterval(pollRemoteChanges, SYNC_POLL_MS);
 
   refreshAccountUI();
   if (cloud.getAccount() && navigator.onLine) doSync({ silent: true });
@@ -866,14 +1399,14 @@ function init() {
     renderSegRows();
   });
   $('#btn-add-gas').addEventListener('click', () => {
-    gasRows.push({ o2: 50, he: 0, use: 'deco', switchDepth: 21 });
+    gasRows.push({ o2: 50, he: 0, use: 'deco', switchDepth: null, switchAuto: true });
     renderGasRows();
   });
   $('#btn-plan').addEventListener('click', runPlan);
   $('#btn-save-plan').addEventListener('click', savePlanToLogbook);
-  $('#plan-use-residual').addEventListener('change', e => {
-    $('#plan-si-wrap').hidden = !e.target.checked;
-  });
+  $('#plan-use-residual').addEventListener('change', refreshResidualHint);
+  $('#plan-start').addEventListener('change', refreshResidualHint);
+  $('#set-safetyStopEnabled').addEventListener('change', e => { $('#set-safety-stop-wrap').hidden = !e.target.checked; });
 
   const fileInput = $('#file-uddf');
   fileInput.addEventListener('change', () => { importFiles([...fileInput.files]); fileInput.value = ''; });
@@ -902,6 +1435,11 @@ function init() {
   route();
   initAccount();
   initPWA();
+
+  // saturation off-gasses in real time — keep the dashboard ticking
+  setInterval(() => {
+    if (!document.hidden && $('#view-dashboard').classList.contains('active')) renderDashboard();
+  }, 30000);
 }
 
 init();

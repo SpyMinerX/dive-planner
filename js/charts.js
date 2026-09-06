@@ -143,7 +143,18 @@ export function renderProfileChart(container, profile, opts = {}) {
   container.style.position = 'relative';
   container.appendChild(tip);
 
-  const capture = el('rect', { x: pad.left, y: pad.top, width: iw, height: ih, fill: 'transparent' }, svg);
+  const capture = el('rect', {
+    x: pad.left, y: pad.top, width: iw, height: ih, fill: 'transparent', class: 'capture',
+    ...(opts.onTimeClick ? { style: 'cursor: crosshair' } : {}),
+  }, svg);
+  if (opts.onTimeClick) {
+    capture.addEventListener('click', ev => {
+      const rect = svg.getBoundingClientRect();
+      const px = (ev.clientX - rect.left) * (W / rect.width);
+      const t = Math.max(0, Math.min(tMax, ((px - pad.left) / iw) * tMax));
+      opts.onTimeClick(t);
+    });
+  }
   capture.addEventListener('pointermove', ev => {
     const rect = svg.getBoundingClientRect();
     const px = (ev.clientX - rect.left) * (W / rect.width);
