@@ -231,10 +231,14 @@ export function otuRate(ppO2) {
  *   gfLow/gfHigh: gradient factors as fractions (e.g. 0.35 / 0.75)
  *   startTissues: Tissues instance (residual loading) or null for clean
  *   surfaceP, descentRate, ascentRate, lastStopDepth, sacBottom, sacDeco
- *   safetyStopDepth/safetyStopMin: optional extra stop held on the way up
- *     (e.g. 5 m for 3 min) on top of whatever the model already requires —
- *     added even to a no-decompression dive. Pass safetyStopDepth: null (or
- *     safetyStopMin: 0) to leave it out.
+ *   safetyStopDepth/safetyStopMin: optional extra stop time (e.g. 5 m for
+ *     3 min) on top of whatever the model already requires. On a genuine
+ *     no-decompression dive this adds a stand-alone stop at that depth; on a
+ *     dive that already needs real decompression it instead just makes sure
+ *     the dive's own last (shallowest) mandatory stop runs at least that
+ *     long, rather than bolting on a separate stop at a depth that may not
+ *     land on the deco ladder. Pass safetyStopDepth: null (or safetyStopMin:
+ *     0) to leave it out entirely.
  * @returns plan { schedule, profile, tissuesEnd, warnings, tts, runtime, cns, otu, gasUsage, ndl, firstStop }
  */
 export function planDive(opts) {
@@ -422,9 +426,15 @@ export function planDive(opts) {
   firstStopDepth = rawCeiling <= 0 ? 0 : Math.max(lastStopDepth, Math.ceil(rawCeiling / 3) * 3);
 
   // Optional extra safety stop (e.g. 5 m / 3 min) held on top of whatever the
-  // model already requires — even on a no-decompression dive. `safetyStopDone`
-  // flips true once it's been held so it's never forced a second time.
+  // model already requires. `safetyStopDone` flips true once it's been held
+  // so it's never forced a second time. A dive that already needs real
+  // decompression doesn't get a separate stop bolted on at the configured
+  // depth (which may not even land on the deco ladder) — instead its own
+  // last, shallowest mandatory stop just has to run at least that long,
+  // exactly the way a diver would actually extend it. Only a genuine
+  // no-decompression dive gets a stand-alone stop at the configured depth.
   let safetyStopDone = safetyStopDepth == null || safetyStopMin <= 0;
+  const effectiveSafetyDepth = safetyStopDone ? null : (firstStopDepth > 0 ? lastStopDepth : safetyStopDepth);
 
   function maybeSwitchGas(d) {
     // Reverting from a deeper bottom-chain gas (e.g. a hypoxic bottom trimix)
@@ -467,7 +477,7 @@ export function planDive(opts) {
   /** The next 3 m-grid stop above fromDepth — pulled in to the safety-stop depth if that sits between the two. */
   function nextGridStep(fromDepth) {
     let next = Math.max(0, fromDepth - 3 < lastStopDepth ? 0 : fromDepth - 3);
-    if (!safetyStopDone && safetyStopDepth < fromDepth - 1e-9 && safetyStopDepth > next + 1e-9) next = safetyStopDepth;
+    if (!safetyStopDone && effectiveSafetyDepth < fromDepth - 1e-9 && effectiveSafetyDepth > next + 1e-9) next = effectiveSafetyDepth;
     return next;
   }
 
@@ -493,14 +503,14 @@ export function planDive(opts) {
     }
     // Force a pause at the safety-stop depth too, once nothing deeper is
     // still forcing the ascent to stop somewhere below it.
-    if (!safetyStopDone && safetyStopDepth <= depth + 1e-9 && safetyStopDepth > target + 1e-9) {
-      target = safetyStopDepth;
+    if (!safetyStopDone && effectiveSafetyDepth <= depth + 1e-9 && effectiveSafetyDepth > target + 1e-9) {
+      target = effectiveSafetyDepth;
     }
 
     if (target >= depth - 1e-9) {
       // Can't ascend — hold as a deco stop (or the safety stop) at current depth in 1-min steps
       const stopDepth = depth;
-      const atSafetyStop = !safetyStopDone && Math.abs(stopDepth - safetyStopDepth) < 1e-6;
+      const atSafetyStop = !safetyStopDone && Math.abs(stopDepth - effectiveSafetyDepth) < 1e-6;
       let stopTime = 0;
       while (maybeSwitchGas(stopDepth)) { /* resolve any stacked switches at this depth */ }
       let innerGuard = 0;
@@ -520,7 +530,7 @@ export function planDive(opts) {
         sample();
       }
       if (atSafetyStop) safetyStopDone = true;
-      if (stopTime > 0) schedule.push({ type: 'stop', from: stopDepth, to: stopDepth, duration: stopTime, runtime: t, gas });
+      if (stopTime > 0) schedule.push({ type: 'stop', from: stopDepth, to: stopDepth, duration: stopTime, runtime: t, gas, safety: atSafetyStop });
       const next = nextGridStep(stopDepth);
       ascendTo(next);
       while (maybeSwitchGas(depth)) { /* resolve any stacked switches at this depth */ }

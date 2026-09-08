@@ -40,10 +40,12 @@ function niceStep(range, targetTicks) {
 
 // event marker palette: color + glyph, never color alone
 export const EVENT_STYLE = {
-  'gas-switch': { color: '#199e70', glyph: '⇄', name: 'Gas switch' },
-  'emergency':  { color: '#d03b3b', glyph: '⚠', name: 'Emergency' },
-  'wildlife':   { color: '#3987e5', glyph: '✳', name: 'Sighting' },
-  'note':       { color: '#c98500', glyph: '✎', name: 'Note' },
+  'gas-switch':  { color: '#199e70', glyph: '⇄', name: 'Gas switch' },
+  'emergency':   { color: '#d03b3b', glyph: '⚠', name: 'Emergency' },
+  'wildlife':    { color: '#3987e5', glyph: '✳', name: 'Sighting' },
+  'note':        { color: '#c98500', glyph: '✎', name: 'Note' },
+  'deco-stop':   { color: '#d95926', glyph: '⏸', name: 'Deco stop' },
+  'safety-stop': { color: '#2dd4ea', glyph: '✓', name: 'Safety stop' },
 };
 
 /**
@@ -107,7 +109,7 @@ export function renderProfileChart(container, profile, opts = {}) {
   el('path', { d: `${line}L${x(tMax).toFixed(1)},${y(0)}L${x(profile[0].t).toFixed(1)},${y(0)}Z`, fill: 'url(#depthFill)', stroke: 'none' }, svg);
   el('path', { d: line, fill: 'none', stroke: SERIES.depth, 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }, svg);
 
-  // event markers (gas switches, emergencies, …) — color + glyph + label
+  // event markers (gas switches, emergencies, deco/safety stops, …) — color + glyph (+ label unless suppressed)
   for (const ev of opts.events || []) {
     const st = EVENT_STYLE[ev.type] || EVENT_STYLE.note;
     const cx = x(Math.min(ev.t, tMax)), cy = y(Math.max(0, Math.min(dMax, ev.depth)));
@@ -115,8 +117,10 @@ export function renderProfileChart(container, profile, opts = {}) {
     el('circle', { cx, cy, r: 8, fill: st.color, stroke: '#0c1626', 'stroke-width': 2 }, g);
     const glyph = el('text', { x: cx, y: cy + 3.5, 'text-anchor': 'middle', class: 'event-glyph' }, g);
     glyph.textContent = st.glyph;
-    const lbl = el('text', { x: cx + 12, y: cy + 4, class: 'mark-label' }, g);
-    lbl.textContent = ev.label || st.name;
+    if (!ev.noLabel) {
+      const lbl = el('text', { x: cx + 12, y: cy + 4, class: 'mark-label' }, g);
+      lbl.textContent = ev.label || st.name;
+    }
     const tt = el('title', {}, g);
     tt.textContent = `${st.name}${ev.label ? ': ' + ev.label : ''} — ${fmtTime(ev.t)} at ${ev.depth.toFixed(0)} m`;
   }

@@ -383,6 +383,8 @@ input:focus, select:focus { outline: 2px solid var(--accent-deep); border-color:
 .table tr:last-child td { border-bottom: none; }
 tr.sched-stop td:first-child { color: var(--series-orange); }
 tr.sched-switch td { background: rgba(25, 158, 112, 0.07); }
+tr.sched-safety td:first-child { color: var(--accent); }
+tr.sched-safety td { background: rgba(45, 212, 234, 0.07); }
 .switch-mark { color: var(--status-good); font-weight: 700; }
 
 .gas-chip {

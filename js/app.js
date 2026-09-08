@@ -574,10 +574,11 @@ function scheduleTableHtml(schedule, gasNameOf) {
       ? (standalone ? `${s.to.toFixed(0)} m` : `${s.from.toFixed(0)} → ${s.to.toFixed(0)} m`)
       : `${s.to.toFixed(0)} m`;
     const durText = standalone || !s.duration ? '—' : s.duration < 0.95 ? `${Math.round(s.duration * 60)} s` : fmtDur(s.duration);
-    const phase = standalone ? 'gas switch' : s.type.replace('-', ' ');
-    const icon = standalone ? '⇄' : (SCHED_ICON[s.type] || '');
+    const isSafety = !standalone && s.type === 'stop' && s.safety;
+    const phase = standalone ? 'gas switch' : isSafety ? 'safety stop' : s.type.replace('-', ' ');
+    const icon = standalone ? '⇄' : isSafety ? '✓' : (SCHED_ICON[s.type] || '');
     const gasChip = `${switched ? '<span class="switch-mark" title="Gas switch">⇄</span> ' : ''}<span class="gas-chip">${escapeHtml(gasNameOf(s))}</span>`;
-    return `<tr class="sched-${standalone ? 'switch' : s.type}">
+    return `<tr class="sched-${standalone ? 'switch' : s.type}${isSafety ? ' sched-safety' : ''}">
       <td>${icon} ${phase}</td>
       <td>${depthText}</td>
       <td>${durText}</td>
@@ -586,6 +587,24 @@ function scheduleTableHtml(schedule, gasNameOf) {
     </tr>`;
   }).join('');
   return `<thead><tr><th>Phase</th><th>Depth</th><th>Duration</th><th>Runtime (min)</th><th>Gas</th></tr></thead><tbody>${rows}</tbody>`;
+}
+
+/**
+ * Marker events for the profile chart, one per deco/safety stop, placed at
+ * the stop's mid-point in time so it sits inside the flat plateau it
+ * represents. No text label (there can be a dozen stops on a serious deco
+ * dive) — the colour + glyph + hover tooltip are enough to spot them at a
+ * glance without turning the chart into a wall of text.
+ */
+function stopEventsFromSchedule(schedule) {
+  return schedule
+    .filter(s => s.type === 'stop' && s.duration > 0)
+    .map(s => ({
+      t: s.runtime - s.duration / 2,
+      depth: s.to,
+      type: s.safety ? 'safety-stop' : 'deco-stop',
+      noLabel: true,
+    }));
 }
 
 /**
@@ -672,7 +691,8 @@ function renderPlanResults(plan, gases) {
     </div>`).join('');
 
   const events = plan.schedule.filter(s => s.type === 'switch')
-    .map(s => ({ t: s.runtime, depth: s.from, type: 'gas-switch', label: s.gas.name }));
+    .map(s => ({ t: s.runtime, depth: s.from, type: 'gas-switch', label: s.gas.name }))
+    .concat(stopEventsFromSchedule(plan.schedule));
   renderProfileChart($('#plan-chart'), plan.profile, { events });
 
   $('#plan-schedule').innerHTML = scheduleTableHtml(plan.schedule, s => s.gas.name);
@@ -720,6 +740,7 @@ function savePlanToLogbook() {
         type: s.type, from: s.from, to: s.to,
         duration: +s.duration.toFixed(2), runtime: +s.runtime.toFixed(2),
         gasName: s.gas.name,
+        ...(s.safety ? { safety: true } : {}),
       })),
       gasUsage: gasUsageRows(lastPlanInputs.gases, lastPlan.gasUsage),
     },
@@ -904,7 +925,8 @@ function renderSharedPlan(dive, sharedBy) {
     const res = replayProfile(samples, null, SURFACE_PRESSURE);
     const events = diveEvents(dive, samples)
       .map(e => ({ ...e, depth: e.depth ?? depthAt(samples, e.t) }))
-      .sort((a, b) => a.t - b.t);
+      .sort((a, b) => a.t - b.t)
+      .concat(dive.plan?.schedule ? stopEventsFromSchedule(dive.plan.schedule) : []);
     renderProfileChart($('#shared-chart'), res.profile, { events });
     renderTissueChart($('#shared-tissues'), res.tissues);
   }
@@ -1145,7 +1167,11 @@ function showDiveDetail(id) {
 
   const events = diveEvents(dive, samples)
     .map(e => ({ ...e, depth: e.depth ?? depthAt(samples, e.t) }))
-    .sort((a, b) => a.t - b.t);
+    .sort((a, b) => a.t - b.t)
+    // stop markers come from the plan's own schedule, so only overlay them
+    // while the samples on screen are still the plan's (once replaced with a
+    // real recorded dive, the timeline no longer matches the old schedule).
+    .concat(planned && dive.plan?.schedule ? stopEventsFromSchedule(dive.plan.schedule) : []);
   renderProfileChart($('#detail-chart'), res.profile, {
     events,
     // tap the timeline to prefill the add-event time
@@ -1358,7 +1384,7 @@ function refreshSafetyStopHint() {
   const hint = $('#plan-safety-stop-hint');
   if (!hint) return;
   hint.textContent = settings.safetyStopEnabled
-    ? `Safety stop: ${settings.safetyStopDepth} m for ${settings.safetyStopMin} min, added to every plan (change in Settings).`
+    ? `Safety stop: ${settings.safetyStopDepth} m for ${settings.safetyStopMin} min on a no-deco dive; on a deco dive its last stop just runs at least that long instead (change in Settings).`
     : 'No safety stop configured — enable one in Settings to add it to every plan.';
 }
 
