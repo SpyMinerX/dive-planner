@@ -4,6 +4,8 @@
 
 import { Tissues, makeGas, gasName, mod, minDepth, MIN_PPO2, planDive, replayProfile, surfaceInterval, depthToPressure, SURFACE_PRESSURE } from './deco.js';
 import { parseUDDF, exportUDDF } from './uddf.js';
+import { parseCSV } from './csv.js';
+import { parseFIT } from './fit.js';
 import * as store from './store.js';
 import * as cloud from './sync.js';
 import { renderProfileChart, renderTissueChart, renderGFMeter, EVENT_STYLE } from './charts.js';
@@ -258,7 +260,7 @@ function renderDashboard() {
 
   const recent = $('#dash-recent');
   if (!nDives) {
-    recent.innerHTML = '<p class="empty">Your logbook is empty.<br>Start fresh in the planner, or import UDDF files from your dive computer.</p>';
+    recent.innerHTML = '<p class="empty">Your logbook is empty.<br>Start fresh in the planner, or import a dive log (UDDF, CSV or Garmin FIT) from your dive computer.</p>';
   } else {
     recent.innerHTML = logbook.slice(-5).reverse().map(diveCardHtml).join('');
     bindDiveCards(recent);
@@ -801,7 +803,7 @@ function renderLogbook() {
   const list = $('#logbook-list');
   list.hidden = false;
   if (!logbook.length) {
-    list.innerHTML = '<p class="empty">No dives yet. Import UDDF files or save a plan from the planner.</p>';
+    list.innerHTML = '<p class="empty">No dives yet. Import dive logs (UDDF, CSV or Garmin FIT) or save a plan from the planner.</p>';
     return;
   }
   list.innerHTML = [...logbook].reverse().map(diveCardHtml).join('');
@@ -866,6 +868,7 @@ function renderSharedPlan(dive, sharedBy) {
     <div class="card">
       <h2>Profile</h2>
       <p class="card-hint">Gases: ${escapeHtml(gasesLabel(dive.gases))}</p>
+      <div id="shared-chart" class="chart-box"></div>
     </div>
     ${dive.plan ? `
     <div class="card plan-card">
@@ -883,12 +886,28 @@ function renderSharedPlan(dive, sharedBy) {
       <h2 class="mt">Gas requirements</h2>
       <div class="table-scroll"><table class="table">${gasUsageTableHtml(dive.plan.gasUsage)}</table></div>` : ''}
     </div>` : '<p class="empty">This shared dive has no plan details.</p>'}
+    <div class="card">
+      <h2>Tissue loading on surfacing</h2>
+      <div id="shared-tissues" class="chart-box"></div>
+    </div>
     <p class="card-hint"><a href="#/">← Back to Abyss</a></p>`;
 
   $('#btn-shared-view-only').addEventListener('click', () => {
     $('#shared-add-hint').textContent = "Just viewing — nothing has been added to your logbook.";
   });
   $('#btn-shared-add').addEventListener('click', () => addSharedToLogbook(dive, sharedBy));
+
+  // --- profile + tissue charts, same replay as the logbook detail view ---
+  const gases = diveGasObjects(dive);
+  const samples = (dive.samples || []).map(s => ({ t: s.t, depth: s.depth, gas: gases[Math.min(s.gasIdx || 0, gases.length - 1)] }));
+  if (samples.length) {
+    const res = replayProfile(samples, null, SURFACE_PRESSURE);
+    const events = diveEvents(dive, samples)
+      .map(e => ({ ...e, depth: e.depth ?? depthAt(samples, e.t) }))
+      .sort((a, b) => a.t - b.t);
+    renderProfileChart($('#shared-chart'), res.profile, { events });
+    renderTissueChart($('#shared-tissues'), res.tissues);
+  }
 }
 
 function addSharedToLogbook(dive, sharedBy) {
@@ -993,10 +1012,10 @@ function showDiveDetail(id) {
     ${planned ? `
     <div class="card replace-card">
       <h2>Replace with actual dive data</h2>
-      <p class="card-hint">Dived this plan? Import the recorded dive from your dive computer (UDDF) —
-        the tissue chain and every following dive will then be computed from the real profile,
-        not the plan. Your current and planned saturation stay separate until then.</p>
-      <button type="button" class="btn btn-primary btn-sm" id="btn-replace-uddf">Import actual dive (UDDF)…</button>
+      <p class="card-hint">Dived this plan? Import the recorded dive from your dive computer (UDDF, CSV or
+        Garmin FIT) — the tissue chain and every following dive will then be computed from the real
+        profile, not the plan. Your current and planned saturation stay separate until then.</p>
+      <button type="button" class="btn btn-primary btn-sm" id="btn-replace-uddf">Import actual dive…</button>
       <p class="card-hint">Tip: importing on the Logbook page also works — a dive recorded within
         ±6 h of a plan's start replaces that plan automatically.</p>
     </div>` : ''}
@@ -1078,13 +1097,16 @@ function showDiveDetail(id) {
     $('#btn-replace-uddf').addEventListener('click', () => {
       const inp = document.createElement('input');
       inp.type = 'file';
-      inp.accept = '.uddf,.xml,application/xml';
+      inp.accept = '.uddf,.xml,application/xml,.csv,text/csv,.fit';
       inp.onchange = () => {
         const file = inp.files[0];
         if (!file) return;
+        const format = importFormatFor(file.name);
         const reader = new FileReader();
         reader.onload = () => {
-          const { dives, errors } = parseUDDF(reader.result);
+          const { dives, errors } = format === 'fit' ? parseFIT(reader.result)
+            : format === 'csv' ? parseCSV(reader.result)
+            : parseUDDF(reader.result);
           if (!dives.length) { toast(errors[0] || 'No dive found in that file.', 'error'); return; }
           const d = dives[0];
           applyActual({
@@ -1094,10 +1116,12 @@ function showDiveDetail(id) {
             gases: d.gases.map(g => ({ o2: g.o2, he: g.he, name: g.name })),
             samples: d.samples,
             gps: dive.gps || d.gps || null,
+            buddy: dive.buddy || d.buddy || '',
           });
           if (dives.length > 1) toast('File held several dives — used the first one.', 'warn');
         };
-        reader.readAsText(file);
+        if (format === 'fit') reader.readAsArrayBuffer(file);
+        else reader.readAsText(file);
       };
       inp.click();
     });
@@ -1209,6 +1233,7 @@ function absorbImportedDives(entries) {
         samples: e.samples,
         gps: match.gps || e.gps || null,
         site: match.site || e.site,
+        buddy: match.buddy || e.buddy || '',
         notes: match.notes || e.notes,
         source: 'dive',
         events: null,
@@ -1223,6 +1248,14 @@ function absorbImportedDives(entries) {
   return replaced;
 }
 
+/** Which parser handles a file, by extension — content sniffing isn't worth it for three well-defined suffixes. */
+function importFormatFor(filename) {
+  const ext = filename.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1];
+  if (ext === 'csv') return 'csv';
+  if (ext === 'fit') return 'fit';
+  return 'uddf'; // .uddf, .xml, or unrecognized — parseUDDF reports a clear error either way
+}
+
 function importFiles(files) {
   if (!files.length) return;
   let imported = 0;
@@ -1231,18 +1264,22 @@ function importFiles(files) {
   let pending = files.length;
 
   for (const file of files) {
+    const format = importFormatFor(file.name);
     const reader = new FileReader();
     reader.onload = () => {
-      const { dives, errors } = parseUDDF(reader.result);
-      allErrors.push(...errors);
+      const { dives, errors } = format === 'fit' ? parseFIT(reader.result)
+        : format === 'csv' ? parseCSV(reader.result)
+        : parseUDDF(reader.result);
+      allErrors.push(...errors.map(e => file.name + ': ' + e));
       if (dives.length) {
         const entries = dives.map(d => ({
           id: store.newId(),
           datetime: d.datetime,
-          site: d.site || file.name.replace(/\.(uddf|xml)$/i, ''),
+          site: d.site || file.name.replace(/\.[a-z0-9]+$/i, ''),
           gps: d.gps || null,
+          buddy: d.buddy || '',
           notes: d.notes,
-          source: 'uddf',
+          source: format,
           maxDepth: d.maxDepth,
           duration: d.duration,
           surfaceIntervalMin: d.surfaceIntervalMin,
@@ -1267,7 +1304,8 @@ function importFiles(files) {
       }
     };
     reader.onerror = () => { allErrors.push(`Could not read ${file.name}`); if (--pending === 0 && allErrors.length) toast(allErrors[0], 'error'); };
-    reader.readAsText(file);
+    if (format === 'fit') reader.readAsArrayBuffer(file);
+    else reader.readAsText(file);
   }
 }
 
@@ -1490,13 +1528,55 @@ function initAccount() {
   if (cloud.getAccount() && navigator.onLine) doSync({ silent: true });
 }
 
+/* -------------------------------- mobile -------------------------------- */
+
+/**
+ * Keep the fixed bottom tab bar pinned to the bottom of what's actually
+ * visible when the on-screen keyboard opens. `position: fixed; bottom: 0`
+ * alone anchors to the *layout* viewport, which mobile browsers don't shrink
+ * for the keyboard — so without this the bar ends up hidden behind it (or
+ * floating mid-screen once the browser scrolls the focused field into view).
+ * The visualViewport API reports the part of the page actually on screen, so
+ * nudging the bar up by however much has been covered keeps it in place.
+ */
+function initMobileKeyboardFix() {
+  const vv = window.visualViewport;
+  if (!vv) return; // older browser — bar stays put, matching pre-fix behavior
+  const nav = $('.nav');
+  const reposition = () => {
+    const covered = window.innerHeight - vv.height - vv.offsetTop;
+    nav.style.transform = covered > 1 ? `translateY(-${covered}px)` : '';
+  };
+  vv.addEventListener('resize', reposition);
+  vv.addEventListener('scroll', reposition);
+}
+
 /* -------------------------------- PWA --------------------------------- */
 
 let deferredInstall = null;
 
 function initPWA() {
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js').catch(e => console.warn('SW registration failed', e));
+    // Fires once a new worker actually takes over. skipWaiting()+clients.claim()
+    // in sw.js mean this can happen without any user action — but it *also*
+    // fires the very first time a page gets claimed at all, which isn't an
+    // update, just first install; only announce when a controller is being
+    // replaced, not acquired for the first time.
+    let hadController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (hadController) announceUpdateAvailable();
+      hadController = true;
+    });
+    navigator.serviceWorker.register('sw.js').then(reg => {
+      // The browser only checks for a changed sw.js on its own schedule (as
+      // infrequently as once a day) — far too slow on a phone that's mostly
+      // reopened from the home screen rather than freshly navigated to. Ask
+      // explicitly right away, and again every time the app comes back to
+      // the foreground, so a stale worker gets replaced promptly.
+      reg.update().catch(() => {});
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => {}); });
+      window.addEventListener('pageshow', () => reg.update().catch(() => {}));
+    }).catch(e => console.warn('SW registration failed', e));
   }
   window.addEventListener('beforeinstallprompt', e => {
     e.preventDefault();
@@ -1532,16 +1612,22 @@ async function clearCacheAndReload() {
 }
 
 /**
- * Live "a new version is deployed" notice, pushed by the server (see
- * sync.subscribeToUpdates) rather than polled for. Updates the Settings
- * status line and pops a sticky toast the user can tap to refresh.
+ * "A new version is available" notice — from either signal: the server
+ * restarting (pushed live over SSE) or a new service worker taking control
+ * on this device (see initPWA). Only announces once per page load.
  */
+let updateAnnounced = false;
+function announceUpdateAvailable() {
+  if (updateAnnounced) return;
+  updateAnnounced = true;
+  const status = $('#set-update-status');
+  if (status) status.textContent = 'A new version is available.';
+  toast('A new version is available — tap to refresh.', 'ok', { sticky: true, onClick: clearCacheAndReload });
+}
+
+/** Live "a new version is deployed" notice, pushed by the server (see sync.subscribeToUpdates) rather than polled for. */
 function initUpdateCheck() {
-  cloud.subscribeToUpdates(() => {
-    const status = $('#set-update-status');
-    if (status) status.textContent = 'A new version is available.';
-    toast('A new version is available — tap to refresh.', 'ok', { sticky: true, onClick: clearCacheAndReload });
-  });
+  cloud.subscribeToUpdates(() => announceUpdateAvailable());
 }
 
 /* ------------------------------- init --------------------------------- */
@@ -1602,6 +1688,7 @@ function init() {
   initAccount();
   initPWA();
   initUpdateCheck();
+  initMobileKeyboardFix();
 
   // saturation off-gasses in real time — keep the dashboard ticking
   setInterval(() => {

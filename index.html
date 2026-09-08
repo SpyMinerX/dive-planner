@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Abyss — Dive Planner & Deco Logbook</title>
   <meta name="description" content="Bühlmann ZH-L16C dive planner and deco logbook with UDDF import. Works offline as a PWA.">
   <meta name="theme-color" content="#060d18">
@@ -57,7 +57,7 @@
           with confidence.</p>
         <div class="hero-actions">
           <a href="#/planner" class="btn btn-primary btn-lg">Start fresh — plan a dive</a>
-          <button id="btn-import-hero" class="btn btn-outline btn-lg">Import UDDF logbook</button>
+          <button id="btn-import-hero" class="btn btn-outline btn-lg">Import dive log</button>
         </div>
       </div>
 
@@ -156,7 +156,7 @@
       <div class="page-head">
         <h1 class="page-title">Deco logbook</h1>
         <div class="page-actions">
-          <button id="btn-import-log" class="btn btn-outline btn-sm">Import UDDF</button>
+          <button id="btn-import-log" class="btn btn-outline btn-sm">Import dives</button>
           <button id="btn-export-log" class="btn btn-outline btn-sm">Export UDDF</button>
         </div>
       </div>
@@ -243,7 +243,7 @@
     conduct dives that your training and certification qualify you for.</p>
   </footer>
 
-  <input type="file" id="file-uddf" accept=".uddf,.xml,application/xml" multiple hidden>
+  <input type="file" id="file-uddf" accept=".uddf,.xml,application/xml,.csv,text/csv,.fit" multiple hidden>
 
   <dialog id="account-dialog" class="account-dialog">
     <form method="dialog" class="account-form" id="account-form">

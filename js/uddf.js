@@ -79,6 +79,34 @@ export function parseUDDF(xmlString) {
     });
   }
 
+  // --- buddies: defined once as <buddy id="..."> under the top-level <diver>,
+  // then referenced per-dive via <informationbeforedive><buddy><link ref=.../>
+  const buddyById = new Map();
+  const diverRoot = firstByLocalName(root, 'diver');
+  if (diverRoot) {
+    for (const buddyEl of byLocalName(diverRoot, 'buddy')) {
+      const id = buddyEl.getAttribute('id');
+      if (!id) continue;
+      const personal = firstByLocalName(buddyEl, 'personal');
+      const name = [text(personal, 'firstname', ''), text(personal, 'lastname', '')].filter(Boolean).join(' ');
+      if (name) buddyById.set(id, name);
+    }
+  }
+  function buddyNamesFor(infoEl) {
+    if (!infoEl) return '';
+    const names = [];
+    for (const ref of byLocalName(infoEl, 'buddy')) {
+      const link = firstByLocalName(ref, 'link');
+      const name = link ? buddyById.get(link.getAttribute('ref')) : null;
+      if (name) { names.push(name); continue; }
+      // some exporters inline the name instead of linking to a definition
+      const personal = firstByLocalName(ref, 'personal');
+      const inline = [text(personal, 'firstname', ''), text(personal, 'lastname', '')].filter(Boolean).join(' ');
+      if (inline) names.push(inline);
+    }
+    return names.join(', ');
+  }
+
   // --- tank → mix indirection (some computers reference tanks, not mixes) ---
   const dives = [];
   const diveEls = byLocalName(root, 'dive');
@@ -183,6 +211,7 @@ export function parseUDDF(xmlString) {
         datetime: datetime && !isNaN(datetime) ? datetime.toISOString() : null,
         site,
         gps,
+        buddy: buddyNamesFor(before),
         notes: text(firstByLocalName(diveEl, 'notes'), 'para', ''),
         maxDepth,
         duration: durationMin,
