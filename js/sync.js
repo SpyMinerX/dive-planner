@@ -128,17 +128,22 @@ export function subscribeToUpdates(onUpdate) {
 
 /**
  * Union by dive id, minus deletions, chronological. On id collisions the copy
- * with the newer modifiedAt stamp wins (unstamped remote loses to local).
+ * with the newer modifiedAt stamp wins. A missing modifiedAt (a dive synced
+ * down before this field existed, or before it was ever edited) counts as
+ * the oldest possible time rather than skipping the comparison — otherwise
+ * an untouched local copy with no stamp at all could outrank a genuinely
+ * newer, stamped edit from another device just because there's nothing to
+ * compare it against.
  */
 export function mergeLogbooks(localDives, remoteDives, deletedIds) {
   const dead = new Set(deletedIds);
   const byId = new Map();
+  const stamp = d => d.modifiedAt ? new Date(d.modifiedAt).getTime() : 0;
   for (const d of remoteDives || []) if (d && d.id && !dead.has(d.id)) byId.set(d.id, d);
   for (const d of localDives || []) {
     if (!d || !d.id || dead.has(d.id)) continue;
     const remote = byId.get(d.id);
-    if (remote && remote.modifiedAt && d.modifiedAt &&
-        new Date(remote.modifiedAt) > new Date(d.modifiedAt)) continue;
+    if (remote && stamp(remote) > stamp(d)) continue;
     byId.set(d.id, d);
   }
   return [...byId.values()].sort((a, b) => {

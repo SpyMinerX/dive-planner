@@ -517,6 +517,27 @@ tr.sched-safety td { background: rgba(45, 212, 234, 0.07); }
 .chart .ref-label { fill: var(--ink-muted); font-size: 10px; font-family: var(--font); }
 .chart-empty { color: var(--ink-muted); }
 
+/* the profile chart owns its own touch gestures (pinch-zoom, pan) instead of
+   letting the page try to scroll/zoom underneath a finger placed on it */
+.profile-chart { touch-action: none; }
+
+.chart-zoom-btn {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  border: 1px solid var(--border);
+  background: rgba(6, 13, 24, 0.72);
+  color: var(--ink-muted);
+  font-size: 0.72rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.chart-zoom-btn:hover { color: var(--ink-secondary); border-color: var(--axis); }
+.chart-zoom-btn.is-reset { color: var(--accent); border-color: var(--accent-deep); background: rgba(45, 212, 234, 0.12); }
+
 .chart-tooltip {
   position: absolute;
   pointer-events: none;

@@ -86,9 +86,14 @@ export function saveLogbook(dives) {
   return write(KEY_LOGBOOK, dives);
 }
 
+/** Adds new dives, stamping modifiedAt so cloud merges have a real timestamp
+ * to compare from the moment a dive exists — without this, a dive synced to
+ * another device before ever being edited has no modifiedAt on either side,
+ * and an unstamped copy can wrongly look "newest" and clobber a later edit. */
 export function addDives(newDives) {
   const book = loadLogbook();
-  book.push(...newDives);
+  const now = new Date().toISOString();
+  book.push(...newDives.map(d => ({ modifiedAt: now, ...d })));
   book.sort((a, b) => {
     if (a.datetime && b.datetime) return new Date(a.datetime) - new Date(b.datetime);
     return 0;
