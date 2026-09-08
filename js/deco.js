@@ -351,20 +351,34 @@ export function planDive(opts) {
     sample();
     return dur;
   }
-  /** Travel to targetDepth, splitting at any bottom-chain switch depths crossed en route. */
+  /**
+   * Travel to targetDepth, splitting at any bottom-chain switch depths
+   * crossed en route (either direction). A multilevel profile can also rise
+   * to a shallower stage well before the final ascent — e.g. deep, then a
+   * long stint at a shallower level for extra bottom time — and a deco gas
+   * already within its MOD there should be picked up for that whole stint,
+   * not left unused until the real ascent; so an ascending leg also checks
+   * decoGases (never a descending one — a deco gas is only ever adopted on
+   * the way up).
+   */
   function travelWithBottomSwitches(targetDepth, sac) {
+    const ascending = targetDepth < depth - 1e-9;
     const lo = Math.min(depth, targetDepth), hi = Math.max(depth, targetDepth);
-    const crossings = bottomChain
-      .map(g => g.switchDepth)
+    const crossings = [
+      ...bottomChain.map(g => g.switchDepth),
+      ...(ascending ? decoGases.map(g => g.switchDepth) : []),
+    ]
       .filter(sd => sd != null && sd > lo + 1e-9 && sd < hi - 1e-9)
       .sort((a, b) => targetDepth > depth ? a - b : b - a);
     let total = 0;
     for (const sd of crossings) {
       total += travelLeg(depth, sd, sac);
       maybeSwitchBottomGas(depth);
+      if (ascending) while (maybeSwitchGas(depth)) { /* resolve any stacked switches at this depth */ }
     }
     total += travelLeg(depth, targetDepth, sac);
     maybeSwitchBottomGas(depth);
+    if (ascending) while (maybeSwitchGas(depth)) { /* resolve any stacked switches at this depth */ }
     return total;
   }
 
@@ -385,9 +399,13 @@ export function planDive(opts) {
       }
       schedule.push({ type: 'bottom', from: depth, to: depth, duration: levelTime, runtime: t, gas });
     }
+    // a segment can now be worked on a deco gas picked up mid-profile (see
+    // travelWithBottomSwitches) — check it against its own ppO2 limit, not
+    // always the bottom-gas one.
+    const ppO2Limit = gas.use === 'deco' ? ppO2MaxDeco : ppO2MaxBottom;
     const ppO2 = pAt(seg.depth) * gas.o2;
-    if (ppO2 > ppO2MaxBottom + 1e-9) {
-      warnings.push({ level: 'critical', text: `ppO₂ ${ppO2.toFixed(2)} bar on ${gas.name} at ${seg.depth} m exceeds ${ppO2MaxBottom} bar (MOD ${mod(gas, ppO2MaxBottom, surfaceP).toFixed(0)} m)` });
+    if (ppO2 > ppO2Limit + 1e-9) {
+      warnings.push({ level: 'critical', text: `ppO₂ ${ppO2.toFixed(2)} bar on ${gas.name} at ${seg.depth} m exceeds ${ppO2Limit} bar (MOD ${mod(gas, ppO2Limit, surfaceP).toFixed(0)} m)` });
     }
     const endDepth = end(seg.depth, gas, surfaceP);
     if (endDepth > 40) warnings.push({ level: 'warning', text: `END ${endDepth.toFixed(0)} m at ${seg.depth} m — significant narcosis load` });

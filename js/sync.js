@@ -85,6 +85,45 @@ export async function remoteMeta() {
   return api('/api/logbook/meta', { token: acc.token });
 }
 
+/* ------------------------------ dive sharing ---------------------------- */
+
+/** Publish a dive plan (a curated subset — see app.js) behind an unguessable link. Returns its id. */
+export async function createShare(dive) {
+  const acc = getAccount();
+  if (!acc) throw new SyncError('error', 'Not signed in.');
+  const { id } = await api('/api/share', { method: 'POST', token: acc.token, body: { dive } });
+  return id;
+}
+
+/** Fetch a shared dive plan by id — no account needed, so this works for a signed-out visitor. */
+export async function fetchShare(id) {
+  return api(`/api/share/${encodeURIComponent(id)}`);
+}
+
+/* --------------------------- update notifications ----------------------- */
+
+/**
+ * Subscribes to the server's live update stream. Calls onUpdate() the first
+ * time the server's boot id changes after the initial connection — that only
+ * happens if the process restarted (a deploy), so it's a real server-pushed
+ * "a new version is available" signal rather than a client-side poll.
+ * No account/auth needed. Returns an unsubscribe function.
+ */
+export function subscribeToUpdates(onUpdate) {
+  if (typeof EventSource === 'undefined') return () => {};
+  let knownBootId = null;
+  const es = new EventSource('/api/updates');
+  es.onmessage = ev => {
+    try {
+      const { bootId } = JSON.parse(ev.data);
+      if (knownBootId == null) knownBootId = bootId;
+      else if (bootId !== knownBootId) onUpdate();
+    } catch { /* ignore a malformed frame */ }
+  };
+  // EventSource retries the connection on its own — nothing to do here.
+  return () => es.close();
+}
+
 /* ------------------------------ merging ------------------------------- */
 
 /**

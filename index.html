@@ -205,6 +205,11 @@
           <p class="card-hint">Everything is stored locally on this device. Export before clearing.</p>
           <button id="btn-export-settings-log" class="btn btn-outline btn-sm">Export logbook (UDDF)</button>
           <button id="btn-clear-data" class="btn btn-danger btn-sm">Clear all data</button>
+          <h2 class="mt">App updates</h2>
+          <p class="card-hint" id="set-update-status">You're on the latest version.</p>
+          <button id="btn-clear-cache" class="btn btn-outline btn-sm">Clear cache &amp; reload</button>
+          <p class="card-hint">Use this if the app looks out of date — it clears the offline cache and
+            service worker, then reloads.</p>
           <h2 class="mt">About</h2>
           <p class="card-hint">Abyss implements the Bühlmann ZH-L16C algorithm with gradient factors,
             NOAA CNS/OTU tracking and UDDF 3.2 import/export. It runs entirely in your browser and
@@ -226,6 +231,9 @@
         <p class="card-hint">Free account — your logbook stays available offline and syncs across devices.</p>
       </div>
     </section>
+
+    <!-- ============================= SHARED PLAN =========================== -->
+    <section id="view-shared" class="view"></section>
   </main>
 
   <footer class="footer">

@@ -19,13 +19,15 @@ const escapeHtml = s => String(s ?? '').replace(/[<>&"]/g, c => ({ '<': '&lt;', 
 
 /* ------------------------------ helpers ------------------------------ */
 
-function toast(msg, kind = 'info') {
+function toast(msg, kind = 'info', { sticky = false, onClick = null } = {}) {
   const t = $('#toast');
   t.textContent = msg;
   t.className = `toast toast-${kind}`;
+  t.classList.toggle('toast-clickable', !!onClick);
+  t.onclick = onClick;
   t.hidden = false;
   clearTimeout(toast._h);
-  toast._h = setTimeout(() => { t.hidden = true; }, 4200);
+  if (!sticky) toast._h = setTimeout(() => { t.hidden = true; }, 4200);
 }
 
 function fmtDur(min) {
@@ -136,16 +138,33 @@ function desatMinutes(tissues) {
 /* ------------------------------- routing ------------------------------ */
 
 const routes = ['dashboard', 'planner', 'logbook', 'settings'];
+const SHARE_ROUTE_RE = /^shared\/([a-f0-9]{32})$/;
 let pendingLogbookDetailId = null;
+let pendingSharedImport = null; // {dive, sharedBy} awaiting sign-in before it can be added
 
 /**
  * Signed-out visitors only ever see the landing page — the tab bar itself is
- * hidden, and whatever hash is in the URL is ignored until they sign in.
+ * hidden, and whatever hash is in the URL is ignored until they sign in — with
+ * one exception: a #/shared/<id> link is a public page, reachable whether or
+ * not the visitor has an account, so it's resolved before the auth gate below.
  * Signing in (or out) re-runs this and swaps the whole app in or out.
  */
 function route() {
+  const rawHash = location.hash.replace(/^#\//, '');
   const authed = !!cloud.getAccount();
   $('#main-nav').classList.toggle('nav-hidden', !authed);
+
+  const sharedMatch = SHARE_ROUTE_RE.exec(rawHash);
+  if (sharedMatch) {
+    for (const r of routes) $(`#view-${r}`).classList.remove('active');
+    $('#view-landing').classList.remove('active');
+    $('#view-shared').classList.add('active');
+    $$('.nav a').forEach(a => a.classList.remove('active'));
+    window.scrollTo(0, 0);
+    loadSharedPlan(sharedMatch[1]);
+    return;
+  }
+  $('#view-shared').classList.remove('active');
 
   if (!authed) {
     for (const r of routes) $(`#view-${r}`).classList.remove('active');
@@ -156,8 +175,7 @@ function route() {
   }
   $('#view-landing').classList.remove('active');
 
-  const hash = location.hash.replace(/^#\//, '') || 'dashboard';
-  const name = routes.includes(hash) ? hash : 'dashboard';
+  const name = routes.includes(rawHash) ? rawHash : 'dashboard';
   for (const r of routes) {
     $(`#view-${r}`).classList.toggle('active', r === name);
   }
@@ -790,6 +808,109 @@ function renderLogbook() {
   bindDiveCards(list);
 }
 
+/* --------------------------- sharing a plan ---------------------------- */
+
+/** Fields worth handing to another diver — deliberately excludes id/computed/modifiedAt, which are only meaningful in the owner's own logbook. */
+function curateShareDive(dive) {
+  const { name, site, notes, gps, datetime, maxDepth, duration, gases, samples, events, plan } = dive;
+  return { name, site, notes, gps, datetime, maxDepth, duration, gases, samples, events, plan };
+}
+
+async function shareDive(dive) {
+  try {
+    const id = await cloud.createShare(curateShareDive(dive));
+    const url = `${location.origin}${location.pathname}#/shared/${id}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      toast('Share link copied — send it to your buddy!', 'ok');
+    } catch {
+      prompt('Copy this link to share the plan:', url);
+    }
+  } catch (e) {
+    toast(`Could not create a share link: ${e.message}`, 'error');
+  }
+}
+
+async function loadSharedPlan(id) {
+  const box = $('#view-shared');
+  box.innerHTML = `<div class="hero hero-compact"><h1 class="hero-title">Loading shared plan…</h1></div>`;
+  try {
+    const { dive, sharedBy } = await cloud.fetchShare(id);
+    renderSharedPlan(dive, sharedBy);
+  } catch (e) {
+    box.innerHTML = `
+      <div class="hero hero-compact">
+        <h1 class="hero-title">Link not found</h1>
+        <p class="hero-sub">${escapeHtml(e.message || 'This share link is invalid or has expired.')}</p>
+        <div class="hero-actions"><a href="#/" class="btn btn-outline btn-lg">Back to Abyss</a></div>
+      </div>`;
+  }
+}
+
+function renderSharedPlan(dive, sharedBy) {
+  const box = $('#view-shared');
+  box.innerHTML = `
+    <div class="page-head">
+      <h1 class="page-title">${escapeHtml(diveTitle(dive))}</h1>
+    </div>
+    <div class="card shared-banner">
+      <p class="card-hint">📤 Shared by <strong>${escapeHtml(sharedBy)}</strong>${dive.site ? ` · ${escapeHtml(dive.site)}` : ''}${dive.datetime ? ` · ${fmtDate(dive.datetime)}` : ''}</p>
+      <p class="card-hint">Just want a look, or add this to your own logbook with ${escapeHtml(sharedBy)} recorded as your buddy?</p>
+      <div class="account-actions">
+        <button type="button" class="btn btn-outline" id="btn-shared-view-only">Just view it</button>
+        <button type="button" class="btn btn-primary" id="btn-shared-add">Add to my logbook</button>
+      </div>
+      <p class="card-hint" id="shared-add-hint"></p>
+    </div>
+    ${dive.notes ? `<p class="card-hint">${escapeHtml(dive.notes)}</p>` : ''}
+    <div class="card">
+      <h2>Profile</h2>
+      <p class="card-hint">Gases: ${escapeHtml(gasesLabel(dive.gases))}</p>
+    </div>
+    ${dive.plan ? `
+    <div class="card plan-card">
+      <h2>Planned schedule — GF ${dive.plan.gfLow}/${dive.plan.gfHigh}</h2>
+      <div class="tile-row">
+        <div class="tile"><span class="tile-value">${fmtDur(dive.plan.runtime)}</span><span class="tile-label">runtime</span></div>
+        <div class="tile"><span class="tile-value">${dive.plan.isDecoDive ? fmtDur(dive.plan.tts) : '—'}</span><span class="tile-label">deco (TTS)</span></div>
+        <div class="tile"><span class="tile-value">${dive.plan.isDecoDive ? dive.plan.firstStop + ' m' : 'no stop'}</span><span class="tile-label">first stop</span></div>
+        <div class="tile"><span class="tile-value">${dive.plan.surfacingGF.toFixed(0)} %</span><span class="tile-label">surfacing GF</span></div>
+        <div class="tile"><span class="tile-value">${dive.plan.cns.toFixed(0)} %</span><span class="tile-label">CNS</span></div>
+        <div class="tile"><span class="tile-value">${dive.plan.otu.toFixed(0)}</span><span class="tile-label">OTU</span></div>
+      </div>
+      <div class="table-scroll"><table class="table">${scheduleTableHtml(dive.plan.schedule, s => s.gasName)}</table></div>
+      ${dive.plan.gasUsage?.length ? `
+      <h2 class="mt">Gas requirements</h2>
+      <div class="table-scroll"><table class="table">${gasUsageTableHtml(dive.plan.gasUsage)}</table></div>` : ''}
+    </div>` : '<p class="empty">This shared dive has no plan details.</p>'}
+    <p class="card-hint"><a href="#/">← Back to Abyss</a></p>`;
+
+  $('#btn-shared-view-only').addEventListener('click', () => {
+    $('#shared-add-hint').textContent = "Just viewing — nothing has been added to your logbook.";
+  });
+  $('#btn-shared-add').addEventListener('click', () => addSharedToLogbook(dive, sharedBy));
+}
+
+function addSharedToLogbook(dive, sharedBy) {
+  if (!cloud.getAccount()) {
+    pendingSharedImport = { dive, sharedBy };
+    $('#shared-add-hint').textContent = 'Sign in (or create a free account) to add this to your logbook — we\'ll finish adding it right after.';
+    openAccountDialog();
+    return;
+  }
+  completeSharedImport(dive, sharedBy);
+}
+
+function completeSharedImport(dive, sharedBy) {
+  const newDive = { ...dive, id: store.newId(), buddy: sharedBy, source: 'plan' };
+  logbook = store.addDives([newDive]);
+  recomputeChain();
+  scheduleSync();
+  toast(`Added to your logbook — ${sharedBy} set as your buddy.`, 'ok');
+  pendingLogbookDetailId = newDive.id;
+  location.hash = '#/logbook';
+}
+
 function showDiveDetail(id) {
   const dive = logbook.find(d => d.id === id);
   if (!dive) return;
@@ -810,22 +931,24 @@ function showDiveDetail(id) {
         <span class="detail-date">${fmtDate(dive.datetime)}</span>
       </h2>
       <div class="page-actions">
+        ${dive.plan ? '<button class="btn btn-outline btn-sm" id="btn-share-plan">🔗 Share plan</button>' : ''}
         <button class="btn btn-outline btn-sm" id="btn-edit-dive">✎ Edit dive</button>
         <button class="btn btn-danger btn-sm" id="btn-del-dive">Delete dive</button>
       </div>
     </div>
-    ${dive.site || mapLink ? `<p class="detail-meta">${escapeHtml(dive.site || '')} ${mapLink}</p>` : ''}
+    ${dive.site || dive.buddy || mapLink ? `<p class="detail-meta">${escapeHtml(dive.site || '')}${dive.buddy ? `${dive.site ? ' · ' : ''}🤿 buddy: ${escapeHtml(dive.buddy)}` : ''} ${mapLink}</p>` : ''}
 
     <form class="card edit-form" id="dive-edit" hidden>
       <h2>Edit dive</h2>
       <div class="field-grid">
         <label>Name <input id="ed-name" value="${escapeHtml(dive.name || '')}" placeholder="e.g. Morning wall dive"></label>
         <label>Dive site <input id="ed-site" value="${escapeHtml(dive.site || '')}" placeholder="e.g. Blue Hole, Gozo"></label>
+        <label>Buddy <input id="ed-buddy" value="${escapeHtml(dive.buddy || '')}" placeholder="e.g. Alex"></label>
         <label>Latitude <input id="ed-lat" type="number" step="any" min="-90" max="90" value="${dive.gps ? dive.gps.lat : ''}"></label>
         <label>Longitude <input id="ed-lon" type="number" step="any" min="-180" max="180" value="${dive.gps ? dive.gps.lon : ''}"></label>
       </div>
       <button type="button" class="btn btn-ghost btn-sm" id="btn-use-gps">📍 Use current location</button>
-      <label class="mt">Notes <textarea id="ed-notes" rows="3" placeholder="Conditions, buddy, equipment, anything worth remembering…">${escapeHtml(dive.notes || '')}</textarea></label>
+      <label class="mt">Notes <textarea id="ed-notes" rows="3" placeholder="Conditions, equipment, anything worth remembering…">${escapeHtml(dive.notes || '')}</textarea></label>
       <div class="account-actions">
         <button type="submit" class="btn btn-primary btn-sm">Save changes</button>
         <button type="button" class="btn btn-ghost btn-sm" id="btn-edit-cancel">Cancel</button>
@@ -897,6 +1020,7 @@ function showDiveDetail(id) {
     </div>`;
 
   $('#btn-back-log').addEventListener('click', renderLogbook);
+  $('#btn-share-plan')?.addEventListener('click', () => shareDive(dive));
   $('#btn-del-dive').addEventListener('click', () => {
     if (!confirm('Delete this dive? Tissue chains for later dives will be recomputed.')) return;
     logbook = store.deleteDive(dive.id);
@@ -929,6 +1053,7 @@ function showDiveDetail(id) {
     logbook = store.updateDive(dive.id, {
       name: $('#ed-name').value.trim(),
       site: $('#ed-site').value.trim(),
+      buddy: $('#ed-buddy').value.trim(),
       gps,
       notes: $('#ed-notes').value.trim(),
     });
@@ -1323,7 +1448,13 @@ function initAccount() {
       await doSync({ silent: true });
       refreshAccountUI();
       dialog.close();
-      route();
+      if (pendingSharedImport) {
+        const { dive, sharedBy } = pendingSharedImport;
+        pendingSharedImport = null;
+        completeSharedImport(dive, sharedBy);
+      } else {
+        route();
+      }
     } catch (e) {
       // the server keeps "wrong password" and "no such account" indistinguishable
       // on purpose (security) — nudge toward registering, since that's the far
@@ -1382,6 +1513,37 @@ function initPWA() {
   window.addEventListener('appinstalled', () => { $('#btn-install').hidden = true; toast('Abyss installed — it now works offline.', 'ok'); });
 }
 
+/** Manual "force update": drop the service worker + its cache, then reload to fetch everything fresh. */
+async function clearCacheAndReload() {
+  try {
+    if ('serviceWorker' in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(r => r.unregister()));
+    }
+    if ('caches' in window) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map(k => caches.delete(k)));
+    }
+  } catch (e) {
+    console.warn('Cache clear failed', e);
+  } finally {
+    location.reload();
+  }
+}
+
+/**
+ * Live "a new version is deployed" notice, pushed by the server (see
+ * sync.subscribeToUpdates) rather than polled for. Updates the Settings
+ * status line and pops a sticky toast the user can tap to refresh.
+ */
+function initUpdateCheck() {
+  cloud.subscribeToUpdates(() => {
+    const status = $('#set-update-status');
+    if (status) status.textContent = 'A new version is available.';
+    toast('A new version is available — tap to refresh.', 'ok', { sticky: true, onClick: clearCacheAndReload });
+  });
+}
+
 /* ------------------------------- init --------------------------------- */
 
 function init() {
@@ -1430,11 +1592,16 @@ function init() {
     renderDashboard();
     toast('All data cleared.', 'ok');
   });
+  $('#btn-clear-cache').addEventListener('click', () => {
+    if (!confirm('Clear the cached app files and reload? Any unsaved planner input will be lost — your logbook and settings are unaffected.')) return;
+    clearCacheAndReload();
+  });
 
   window.addEventListener('hashchange', route);
   route();
   initAccount();
   initPWA();
+  initUpdateCheck();
 
   // saturation off-gasses in real time — keep the dashboard ticking
   setInterval(() => {

@@ -9,6 +9,15 @@
  *   GET  /api/logbook    (Bearer)                     → {dives, deleted, updatedAt}
  *   PUT  /api/logbook    (Bearer) {dives, deleted, baseUpdatedAt}
  *                        → {updatedAt} | 409 {current doc} on conflict
+ *   GET  /api/updates    (SSE, no auth) → {bootId} on connect, then pings.
+ *                        A client that sees bootId change (only possible via
+ *                        a reconnect, since the id is fixed for the process's
+ *                        life) knows the server restarted — i.e. a new
+ *                        version was deployed — and prompts to refresh.
+ *   POST /api/share      (Bearer) {dive}                → {id}
+ *   GET  /api/share/:id  (no auth)                       → {dive, sharedBy, createdAt} | 404
+ *                        A dive plan shared by link — readable by anyone who
+ *                        has the (unguessable) id, expires after 90 days.
  *
  * Storage: JSON files under server/data/ (atomic writes).
  * Passwords: scrypt. Sessions: random bearer tokens, 30-day expiry, persisted.
@@ -28,12 +37,15 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
 const DATA = path.join(__dirname, 'data');
 const LOGBOOKS = path.join(DATA, 'logbooks');
+const SHARES = path.join(DATA, 'shares');
 const PORT = parseInt(process.env.PORT || '8080', 10);
 
 const TOKEN_TTL_MS = 30 * 24 * 3600 * 1000;
+const SHARE_TTL_MS = 90 * 24 * 3600 * 1000;
 const MAX_BODY = 8 * 1024 * 1024; // logbooks with full profiles can be chunky
 
 fs.mkdirSync(LOGBOOKS, { recursive: true });
+fs.mkdirSync(SHARES, { recursive: true });
 
 /* ------------------------------ storage ------------------------------ */
 
@@ -61,6 +73,9 @@ const saveSessions = () => writeJsonAtomic(SESSIONS_FILE, sessions);
 
 const logbookFile = email =>
   path.join(LOGBOOKS, crypto.createHash('sha256').update(email).digest('hex').slice(0, 32) + '.json');
+
+const SHARE_ID_RE = /^[a-f0-9]{32}$/;
+const shareFile = id => path.join(SHARES, id + '.json');
 
 /* ------------------------------- auth -------------------------------- */
 
@@ -126,6 +141,35 @@ function readBody(req) {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+/* ------------------------- live update notifications ------------------- */
+
+// A random id fixed for this process's whole life. Clients hold an SSE
+// connection open (EventSource, which reconnects on its own) and compare the
+// id across reconnects — a changed value only happens if the server process
+// itself restarted, which is exactly the "a new version was deployed" signal,
+// pushed the moment it reconnects rather than waited out on a poll interval.
+const BOOT_ID = crypto.randomBytes(8).toString('hex');
+const sseClients = new Set();
+const SSE_PING_MS = 25000; // keep intermediate proxies from timing out the connection
+
+function handleUpdatesStream(req, res) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-store',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no', // ask nginx not to buffer an SSE response
+  });
+  res.write(`data: ${JSON.stringify({ bootId: BOOT_ID })}\n\n`);
+  sseClients.add(res);
+  const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* client gone */ } }, SSE_PING_MS);
+  req.on('close', () => { clearInterval(ping); sseClients.delete(res); });
+}
+
+function closeAllSseClients() {
+  for (const res of sseClients) { try { res.end(); } catch { /* already gone */ } }
+  sseClients.clear();
+}
+
 /* ------------------------------- API ---------------------------------- */
 
 async function handleApi(req, res, pathname) {
@@ -157,8 +201,32 @@ async function handleApi(req, res, pathname) {
     return send(res, 200, { token: createSession(mail), email: mail });
   }
 
+  // shared plan links are readable by anyone holding the (unguessable) id —
+  // no account needed, so this must come before the auth gate below.
+  if (req.method === 'GET' && pathname.startsWith('/api/share/')) {
+    const id = pathname.slice('/api/share/'.length);
+    if (!SHARE_ID_RE.test(id)) return send(res, 404, { error: 'This share link is invalid.' });
+    const doc = readJson(shareFile(id), null);
+    if (!doc) return send(res, 404, { error: 'This share link is invalid or has expired.' });
+    if (Date.now() - new Date(doc.createdAt).getTime() > SHARE_TTL_MS) {
+      try { fs.unlinkSync(shareFile(id)); } catch { /* already gone */ }
+      return send(res, 404, { error: 'This share link has expired.' });
+    }
+    return send(res, 200, doc);
+  }
+
   const auth = authenticate(req);
   if (!auth) return send(res, 401, { error: 'Not signed in.' });
+
+  if (req.method === 'POST' && pathname === '/api/share') {
+    const body = await readBody(req);
+    if (!body || typeof body !== 'object' || !body.dive || typeof body.dive !== 'object') {
+      return send(res, 400, { error: 'Malformed share request.' });
+    }
+    const id = crypto.randomBytes(16).toString('hex');
+    writeJsonAtomic(shareFile(id), { dive: body.dive, sharedBy: auth.email, createdAt: new Date().toISOString() });
+    return send(res, 200, { id });
+  }
 
   if (req.method === 'POST' && pathname === '/api/logout') {
     delete sessions[auth.token];
@@ -245,15 +313,28 @@ function serveStatic(req, res, pathname) {
 
 /* -------------------------------- server ------------------------------- */
 
-http.createServer(async (req, res) => {
+const server = http.createServer(async (req, res) => {
   const pathname = new URL(req.url, 'http://x').pathname;
   try {
+    if (pathname === '/api/updates' && req.method === 'GET') return handleUpdatesStream(req, res);
     if (pathname.startsWith('/api/')) await handleApi(req, res, pathname);
     else if (req.method === 'GET' || req.method === 'HEAD') serveStatic(req, res, pathname);
     else { res.writeHead(405); res.end(); }
   } catch (e) {
     send(res, 400, { error: e.message });
   }
-}).listen(PORT, () => {
+});
+
+// close SSE connections promptly so a container stop/restart (i.e. a deploy)
+// isn't held up waiting on long-lived keep-alive streams.
+function shutdown() {
+  closeAllSseClients();
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 2000).unref();
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
+
+server.listen(PORT, () => {
   console.log(`Abyss server → http://localhost:${PORT}  (data in ${DATA})`);
 });

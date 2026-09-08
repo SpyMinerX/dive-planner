@@ -196,6 +196,7 @@ main {
   box-shadow: var(--shadow);
   margin-bottom: 1.2rem;
 }
+.shared-banner { border-color: var(--accent-deep); }
 .card h2 {
   margin: 0 0 0.7rem;
   font-size: 0.85rem;
@@ -604,6 +605,7 @@ tr.sched-switch td { background: rgba(25, 158, 112, 0.07); }
 .toast-ok { border-color: var(--status-good); }
 .toast-warn { border-color: var(--status-warning); }
 .toast-error { border-color: var(--status-critical); }
+.toast-clickable { cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
 
 /* -------------------------------- footer ------------------------------- */
 
