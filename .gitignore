@@ -1,2 +1,6 @@
 # user accounts and cloud logbooks — never commit
 server/data/
+node_modules/
+# migration exports contain the full database
+*-export-*.tar
+*-export-*.tar.sha256

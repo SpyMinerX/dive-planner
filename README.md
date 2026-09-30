@@ -41,24 +41,24 @@ Everything runs in the browser — no build step, no backend, no dependencies.
 
 ## Run it
 
-**Docker (recommended for deployment):**
+**Docker (local development):**
 
 ```sh
-docker compose up -d          # builds and runs on port 8080, data in the dive-data volume
-# or from the published image:
-docker run -d --name dive-app -p 8080:8080 \
-  -v dive-data:/app/server/data \
-  spyminer/abyss-deco-planner:latest
+docker compose up -d --build   # app on port 8080 + a throwaway PostgreSQL
 ```
 
-The image runs as the unprivileged `node` user, has a healthcheck, and keeps all
-accounts/logbooks in the `/app/server/data` volume. To publish a new version:
-`docker build -t spyminer/abyss-deco-planner . && docker push spyminer/abyss-deco-planner`.
+The server keeps all accounts, sessions, logbooks and shared links in
+**PostgreSQL**; the container itself is stateless, so it can run as several
+replicas. Configuration comes from the environment — see `.env.example`
+(`DB_HOST`/`DB_PORT`/`DB_NAME`/`DB_USER`/`DB_PASSWORD` or `DATABASE_URL`;
+any `<NAME>_FILE` variable is read from that file, for Docker/Swarm secrets).
+The schema is created automatically at startup.
 
-**With cloud sync** (zero-dependency Node server, also serves the app):
+**Node directly** (needs a reachable PostgreSQL):
 
 ```sh
-node server/server.js          # http://localhost:8080, data in server/data/
+npm ci
+DB_HOST=localhost DB_PASSWORD=… node server/server.js   # http://localhost:8080
 ```
 
 **Static only** (no accounts — the app works fine without the API):
@@ -70,8 +70,86 @@ python -m http.server 8080
 
 Open http://localhost:8080. To install as an app, use the browser's install button
 (service workers require localhost or HTTPS). For production, put a TLS-terminating
-reverse proxy (Caddy, nginx) in front of the Node server — credentials must not
-travel over plain HTTP.
+reverse proxy in front of the Node server — credentials must not travel over plain HTTP.
+
+## Deploying on AegisMesh (Docker Swarm)
+
+| | |
+|---|---|
+| Image | `spyminer/abyss-deco-planner:<version>` (Docker Hub — use immutable tags, not `latest`) |
+| Stack file | `stack.portainer.yml` (network `aegis-web`, 2 replicas on `apps == true`, Traefik labels) |
+| Internal port | `8080` — no published host ports; Traefik routes to it |
+| Public hostname | set in the Traefik `Host(...)` rule in `stack.portainer.yml` |
+| Health | `GET /healthz` → `200 ok` / `503` when PostgreSQL is unreachable (also the image `HEALTHCHECK`) |
+| Database | `postgres-ha:5000`, database `abyss`, role `abyss` (no extensions needed) |
+| Secrets | `abyss_db_password` (Swarm secret, mounted via `DB_PASSWORD_FILE`) |
+| Volumes / uploads | none |
+
+HA notes: logbook writes use a row lock, so the optimistic-concurrency check is
+atomic across replicas; the "new version" prompt uses a fingerprint of the
+image's app files, so it is identical on every replica of a release; dropped DB
+connections (Patroni failover) are replaced on the next query.
+
+**1. Build and push** (the old server's compose file uses `:latest` — don't push
+`latest` until the old deployment is retired):
+
+```sh
+docker build -t spyminer/abyss-deco-planner:2.0.0 . && docker push spyminer/abyss-deco-planner:2.0.0
+```
+
+**2. Database and secret** — on the Patroni leader (`patronictl list`):
+
+```sh
+sudo -u postgres psql -c "CREATE ROLE abyss LOGIN PASSWORD '<pw>';" -c "CREATE DATABASE abyss OWNER abyss;"
+```
+
+Then Portainer → Swarm → Secrets → `abyss_db_password` = exactly that password.
+
+**3. Deploy** — Portainer → Stacks → Add stack → Web editor → paste
+`stack.portainer.yml` (hostname and tag filled in) → Deploy. Wait for 2 healthy tasks.
+
+**4. Migrate the data** from the old JSON volume. On the old server:
+
+```sh
+IMAGE=spyminer/abyss-deco-planner:2.0.0
+docker compose stop                                  # stop writes (omit for a rehearsal)
+docker pull $IMAGE
+docker run --rm -u root   -v <compose-project>_dive-data:/app/server/data:ro -v "$PWD:/export"   $IMAGE node scripts/export-data.mjs --data /app/server/data --out /export
+```
+
+Transfer `abyss-export-<timestamp>.tar` **and** its `.sha256` (binary mode) to an
+AegisMesh node, then import as a one-off Swarm service (it uses the app's own secret):
+
+```sh
+F=abyss-export-<timestamp>.tar
+sudo docker service create --name abyss-import --detach   --restart-condition none --network aegis-web --user root   --constraint node.hostname==$(hostname) --secret abyss_db_password   -e DB_HOST=postgres-ha -e DB_PORT=5000 -e DB_NAME=abyss -e DB_USER=abyss   -e DB_PASSWORD_FILE=/run/secrets/abyss_db_password   --mount type=bind,src=$HOME,dst=/import,readonly   spyminer/abyss-deco-planner:2.0.0   node scripts/migrate-json-to-postgres.mjs --archive /import/$F
+until sudo docker service ps abyss-import --format '{{.CurrentState}}' | grep -qE 'Complete|Failed|Rejected'; do sleep 3; done
+sudo docker service logs --raw abyss-import && sudo docker service rm abyss-import
+```
+
+Expect `Archive checksum OK`, `OK` on every validation line (users, sessions,
+logbooks, dives, shares) and `Database import committed.` The import is one
+transaction and refuses a non-empty target unless `--replace` is given.
+Unexpired sessions are carried over, so users stay signed in. Afterwards delete
+the `.tar` from both machines — it contains every password hash and logbook.
+
+**5. Verify and cut over:**
+
+```sh
+curl -fsS -H 'Host: <hostname>' http://127.0.0.1:8080/healthz      # → ok
+sudo docker service ps abyss_web                                     # 2 tasks across the apps nodes
+sudo docker service logs --tail 100 abyss_web
+sudo docker service update --force abyss_web                         # site stays up
+```
+
+Then point the Cloudflare tunnel hostname at `http://localhost:8080` and check
+sign-in with an existing account, logbook sync between two devices, and a shared link.
+
+**Rollback:** point the tunnel hostname back at the old server and run
+`docker compose start` there (**start, not up** — the old container keeps its old
+image and untouched JSON volume). Keep the new database for analysis. Once users
+have synced changes to AegisMesh, rolling back loses those changes unless they
+are merged by hand, so agree on a rollback window before cutover.
 
 ## Development
 
@@ -83,7 +161,11 @@ travel over plain HTTP.
 | `js/store.js` | localStorage persistence + deletion tombstones |
 | `js/sync.js` | Account auth + offline-first cloud sync (merge, conflict retry) |
 | `js/app.js` | Views, routing, tissue chaining, account UI, PWA glue |
-| `server/server.js` | Zero-dep cloud server: scrypt auth, bearer sessions, logbook API |
+| `server/server.js` | Cloud server: scrypt auth, bearer sessions, logbook/share API, `/healthz` |
+| `server/db.js` | PostgreSQL pool, schema bootstrap (advisory lock), transactions |
+| `server/secrets.js` | Loads `<NAME>_FILE` (Swarm secrets) into `<NAME>` |
+| `scripts/export-data.mjs` | Packs the old JSON data dir into a checksummed `.tar` |
+| `scripts/migrate-json-to-postgres.mjs` | Imports that archive into PostgreSQL, validated, in one transaction |
 | `scripts/test-deco.mjs` | Engine sanity tests — `node scripts/test-deco.mjs` |
 | `scripts/make-icons.mjs` | Regenerates PNG icons — `node scripts/make-icons.mjs` |
 

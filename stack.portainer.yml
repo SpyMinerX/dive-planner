@@ -1,0 +1,58 @@
+# Abyss on AegisMesh — Docker Swarm stack (paste into Portainer → Stacks → Add stack → Web editor).
+#
+# Before deploying:
+#   1. Postgres role + database "abyss" exist (on the Patroni leader).
+#   2. Swarm secret "abyss_db_password" exists and equals the role's password.
+#   3. Replace abyss.example.com with the app's real public hostname and set
+#      the image tag to the release you pushed.
+services:
+  web:
+    image: spyminer/abyss-deco-planner:2.0.0
+
+    networks:
+      - aegis-web
+
+    environment:
+      PORT: "8080"
+      TRUST_PROXY: "1"
+      DB_HOST: postgres-ha
+      DB_PORT: "5000"
+      DB_NAME: abyss
+      DB_USER: abyss
+      DB_PASSWORD_FILE: /run/secrets/abyss_db_password
+
+    secrets:
+      - abyss_db_password
+
+    stop_grace_period: 20s
+
+    deploy:
+      replicas: 2
+      placement:
+        constraints:
+          - node.labels.apps == true
+      restart_policy:
+        condition: any
+        delay: 5s
+      update_config:
+        parallelism: 1
+        order: start-first
+        failure_action: rollback
+        monitor: 30s
+      rollback_config:
+        parallelism: 1
+        order: start-first
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.abyss.rule=Host(`abyss.example.com`)"
+        - "traefik.http.routers.abyss.entrypoints=web"
+        - "traefik.http.services.abyss.loadbalancer.server.port=8080"
+        - "traefik.swarm.network=aegis-web"
+
+networks:
+  aegis-web:
+    external: true
+
+secrets:
+  abyss_db_password:
+    external: true

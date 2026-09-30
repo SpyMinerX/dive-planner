@@ -1,0 +1,17 @@
+{
+  "name": "abyss-deco-planner",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Abyss dive planner — PWA + Node API (PostgreSQL-backed)",
+  "scripts": {
+    "start": "node server/server.js",
+    "test": "node scripts/test-deco.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "pg": "^8.23.1"
+  }
+}

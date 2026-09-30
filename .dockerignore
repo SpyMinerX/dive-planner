@@ -1,6 +1,13 @@
 .git
 .gitignore
 .claude
+node_modules
 server/data
 Dockerfile
 docker-compose.yml
+stack.portainer.yml
+.env
+.env.*
+*-export-*.tar
+*-export-*.tar.sha256
+*.md
