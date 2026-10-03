@@ -4,6 +4,7 @@
 node_modules
 server/data
 Dockerfile
+docker-bake.hcl
 docker-compose.yml
 stack.portainer.yml
 .env
