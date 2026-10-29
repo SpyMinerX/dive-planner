@@ -1,0 +1,138 @@
+name: Docker image
+
+on:
+  push:
+    branches: [prod]
+  workflow_dispatch:
+
+concurrency:
+  group: docker-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: registry.aegismesh.xyz/spyminer/abyss-deco-planer
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/prod'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to registry
+        uses: docker/login-action@v4
+        with:
+          registry: registry.aegismesh.xyz
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
+
+      - name: Build and push native image
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=image-${{ matrix.arch }}
+          cache-to: type=gha,scope=image-${{ matrix.arch }},mode=max
+
+      - name: Export image digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: build
+    if: github.ref == 'refs/heads/prod'
+    runs-on: ubuntu-24.04
+    env:
+      CONTAINER_WEBHOOK_URL: ${{ secrets.CONTAINER_WEBHOOK_URL }}
+    steps:
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to registry
+        uses: docker/login-action@v4
+        with:
+          registry: registry.aegismesh.xyz
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digests-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+
+      - name: Generate release tags
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=git-,format=short
+
+      - name: Publish multi-arch tags
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        working-directory: ${{ runner.temp }}/digests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          args=()
+          while IFS= read -r tag; do
+            if [ -n "$tag" ]; then
+              args+=(--tag "$tag")
+            fi
+          done <<< "$TAGS"
+
+          for digest in *; do
+            args+=("${IMAGE}@sha256:${digest}")
+          done
+
+          docker buildx imagetools create "${args[@]}"
+          docker buildx imagetools inspect "${IMAGE}:latest"
+
+      - name: Redeploy container
+        if: env.CONTAINER_WEBHOOK_URL != ''
+        run: curl -fsS -X POST "${CONTAINER_WEBHOOK_URL}?tag=latest"
+
+      - name: Summary
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo '### Pushed (linux/amd64, linux/arm64)'
+            echo '```'
+            echo "$TAGS"
+            echo '```'
+            if [ -n "$CONTAINER_WEBHOOK_URL" ]; then
+              echo 'Container redeploy webhook called with tag=latest.'
+            else
+              echo 'No CONTAINER_WEBHOOK_URL secret — redeploy manually.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
